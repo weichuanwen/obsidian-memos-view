@@ -1,4 +1,5 @@
 export const VIEW_TYPE_MEMOS = "memos-view";
+export const VIEW_TYPE_MEMOS_SIDEBAR = "memos-view-sidebar";
 
 export interface MemosPluginSettings {
 	boundFilePath: string;

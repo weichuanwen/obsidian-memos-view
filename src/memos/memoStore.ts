@@ -6,18 +6,16 @@ export async function loadMemosFromDailyNotes(
 	app: App,
 	dailyNotesFolder: string,
 	timestampFormat: string,
-	memoStoreMode: "daily" | "yearly",
 	memoReadMode: "all" | "daily" | "yearly",
 	memoReadHeading: string,
 	excludedFilePath?: string,
 ): Promise<MemoEntry[]> {
-	const effectiveReadMode = memoReadMode === "all" ? "all" : memoReadMode;
 	const files = app.vault
 		.getMarkdownFiles()
-		.filter((file) => isMemoStoreFile(file, dailyNotesFolder, effectiveReadMode))
+		.filter((file) => isMemoStoreFile(file, dailyNotesFolder, memoReadMode))
 		.filter((file) => !excludedFilePath || file.path !== excludedFilePath);
 
-	const memoGroups = await Promise.all(
+	const results = await Promise.allSettled(
 		files.map(async (file) => {
 			const content = await app.vault.cachedRead(file);
 			if (isYearlyFile(file)) {
@@ -27,8 +25,9 @@ export async function loadMemosFromDailyNotes(
 		}),
 	);
 
-	return memoGroups
-		.flat();
+	return results
+		.filter((result): result is PromiseFulfilledResult<MemoEntry[]> => result.status === "fulfilled")
+		.flatMap((result) => result.value);
 }
 
 function isMemoStoreFile(file: TFile, dailyNotesFolder: string, readMode: "all" | "daily" | "yearly"): boolean {

@@ -1,10 +1,10 @@
 import { ItemView, MarkdownRenderer, Menu, Notice, WorkspaceLeaf, setIcon, type ViewStateResult } from "obsidian";
 import { Scope } from "obsidian";
 import type MemosViewPlugin from "../main";
-import { Modal, TFile, type App } from "obsidian";
+import { TFile } from "obsidian";
 import { VIEW_TYPE_MEMOS } from "../types";
 import type { MemosViewFilter, MemosSortOrder, MemosStatusFilter } from "../memos/viewModel";
-import { t } from "../i18n";
+import { t, isZhLocale } from "../i18n";
 import type { MemoEntry, MemosViewState } from "../types";
 import { loadMemosFromDailyNotes } from "./memoStore";
 import { buildViewModel } from "./viewModel";
@@ -19,6 +19,11 @@ import {
 	type WikilinkSuggestion,
 } from "./wikilink";
 import { openMemoShareModal } from "./share";
+import { buildAttachmentEmbedLink } from "../utils/embed";
+import { WikilinkSuggestController } from "../editor/wikilinkSuggest";
+import { insertTextAtCaret } from "../utils/text";
+import { MemosRandomWalkModal } from "./modals/randomWalkModal";
+import { AttachmentPickerModal } from "./modals/attachmentPickerModal";
 
 const MEMOS_PAGE_SIZE = 50;
 
@@ -37,14 +42,15 @@ export class MemosView extends ItemView {
 	private plugin: MemosViewPlugin;
 	private state: MemosViewState = {};
 	private memos: MemoEntry[] = [];
-	private memoStreamContainerEl: HTMLElement | null = null;
+	protected memoStreamContainerEl: HTMLElement | null = null;
 	private stickyDayHeadEl: HTMLElement | null = null;
 	private collapsedTagPaths = new Set<string>();
 	private searchTerm = "";
 	private isSearchComposing = false;
 	private activeTag: string | null = null;
 	private activeDayKey: string | null = null;
-	private sortOrder: MemosSortOrder = "created-desc";
+	/** 子类可覆盖默认排序(侧边栏视图使用时间升序:最新在最底部) */
+	protected sortOrder: MemosSortOrder = "created-desc";
 	private statusFilter: MemosStatusFilter = "all";
 	private viewFilter: MemosViewFilter = "none";
 	private visibleMemoCount = MEMOS_PAGE_SIZE;
@@ -59,6 +65,12 @@ export class MemosView extends ItemView {
 	private sidebarEl: HTMLElement | null = null;
 	private sidebarOverlayEl: HTMLElement | null = null;
 	private isSidebarOpen = false;
+	/** 子类可设为 true 强制使用紧凑布局(侧边栏视图) */
+	protected forceCompactLayout = false;
+	/** 异步渲染/滚动恢复的定时器与 rAF id,在 onClose 中统一清理 */
+	private pendingFrameIds = new Set<number>();
+	private isClosed = false;
+	private wikilinkControllers: WikilinkSuggestController[] = [];
 
 	constructor(leaf: WorkspaceLeaf, plugin: MemosViewPlugin) {
 		super(leaf);
@@ -152,8 +164,44 @@ export class MemosView extends ItemView {
 	}
 
 	async onClose(): Promise<void> {
+		this.isClosed = true;
+		this.wikilinkControllers.forEach((c) => c.destroy());
+		this.wikilinkControllers = [];
+		this.pendingFrameIds.forEach((id) => {
+			window.clearTimeout(id);
+			window.cancelAnimationFrame(id);
+		});
+		this.pendingFrameIds.clear();
 		this.contentEl.empty();
 		document.body.querySelectorAll(".memos-heatmap-preview").forEach((el) => el.remove());
+	}
+
+	/** 注册一个延迟回调,视图关闭时自动清理 */
+	protected scheduleTimeout(callback: () => void, delay: number): void {
+		if (this.isClosed) {
+			return;
+		}
+		const id = window.setTimeout(() => {
+			this.pendingFrameIds.delete(id);
+			if (!this.isClosed) {
+				callback();
+			}
+		}, delay);
+		this.pendingFrameIds.add(id);
+	}
+
+	/** 注册一个 rAF 回调,视图关闭时自动清理 */
+	protected scheduleFrame(callback: () => void): void {
+		if (this.isClosed) {
+			return;
+		}
+		const id = window.requestAnimationFrame(() => {
+			this.pendingFrameIds.delete(id);
+			if (!this.isClosed) {
+				callback();
+			}
+		});
+		this.pendingFrameIds.add(id);
 	}
 
 	async setState(state: MemosViewState, result: ViewStateResult): Promise<void> {
@@ -170,11 +218,13 @@ export class MemosView extends ItemView {
 		await this.render();
 	}
 
-	private async render(): Promise<void> {
+	protected async render(): Promise<void> {
 		const { contentEl } = this;
 		contentEl.empty();
 
 		const shellEl = contentEl.createDiv({ cls: "memos-shell" });
+		const isCompact = this.forceCompactLayout || this.isSidebarLeaf();
+		shellEl.toggleClass("is-compact", isCompact);
 		shellEl.addEventListener("click", (event) => {
 			if (!this.inlineEditingMemoId) {
 				return;
@@ -228,45 +278,19 @@ export class MemosView extends ItemView {
 		// 检查日记插件路径是否已设置
 		const dailyNotesFolder = this.plugin.getDailyNotesFolder();
 		if (!dailyNotesFolder) {
-			// 清空备忘录数据
+			// 未设置日记目录:清空备忘录数据,跳过磁盘加载
 			this.memos = [];
-			const viewModel = buildViewModel(
-				this.memos,
-				this.searchTerm,
-				this.activeTag,
-				this.activeDayKey,
-				this.sortOrder,
-				this.statusFilter,
-				this.viewFilter,
+		} else {
+			this.memos = await loadMemosFromDailyNotes(
+				this.app,
+				dailyNotesFolder,
+				this.plugin.settings.timestampFormat,
+				this.plugin.settings.memoReadMode,
+				this.plugin.settings.memoReadHeading,
+				this.plugin.settings.boundFilePath || undefined,
 			);
-			
-			this.populateSidebar(
-				sidebarEl,
-				viewModel.totalMemos,
-				viewModel.totalTags,
-				viewModel.totalDays,
-				viewModel.heatmap,
-				viewModel.heatmapMonths,
-				viewModel.tagStats,
-				this.getStatusCounts(),
-			);
-			this.renderMemoStream(bodyEl, viewModel.filteredMemos);
-			this.updateStickyDayHead();
-			if (this.isSidebarOpen) {
-				this.openSidebar();
-			}
-			return;
 		}
 
-		this.memos = await loadMemosFromDailyNotes(
-			this.app,
-			dailyNotesFolder,
-			this.plugin.settings.timestampFormat,
-			this.plugin.settings.memoStoreMode,
-			this.plugin.settings.memoReadMode,
-			this.plugin.settings.memoReadHeading,
-			this.plugin.settings.boundFilePath || undefined,
-		);
 		const viewModel = buildViewModel(
 			this.memos,
 			this.searchTerm,
@@ -277,16 +301,18 @@ export class MemosView extends ItemView {
 			this.viewFilter,
 		);
 
-		this.populateSidebar(
-			sidebarEl,
-			viewModel.totalMemos,
-			viewModel.totalTags,
-			viewModel.totalDays,
-			viewModel.heatmap,
-			viewModel.heatmapMonths,
-			viewModel.tagStats,
-			this.getStatusCounts(),
-		);
+		if (!isCompact) {
+			this.populateSidebar(
+				sidebarEl,
+				viewModel.totalMemos,
+				viewModel.totalTags,
+				viewModel.totalDays,
+				viewModel.heatmap,
+				viewModel.heatmapMonths,
+				viewModel.tagStats,
+				this.getStatusCounts(),
+			);
+		}
 		this.renderMemoStream(bodyEl, viewModel.filteredMemos);
 		this.updateStickyDayHead();
 		if (this.isSidebarOpen) {
@@ -304,6 +330,12 @@ export class MemosView extends ItemView {
 		this.isSidebarOpen = false;
 		this.sidebarEl?.removeClass("is-open");
 		this.sidebarOverlayEl?.removeClass("is-visible");
+	}
+
+	/** 判断当前视图是否位于左右侧边栏,用于切换紧凑布局 */
+	private isSidebarLeaf(): boolean {
+		const root = this.leaf.getRoot();
+		return root === this.app.workspace.leftSplit || root === this.app.workspace.rightSplit;
 	}
 
 	private populateSidebar(
@@ -523,12 +555,18 @@ export class MemosView extends ItemView {
 			this.isSearchComposing = false;
 			this.updateSearch(searchEl.value);
 		});
+		let searchDebounceTimer: number | null = null;
 		searchEl.addEventListener("input", () => {
 			if (this.isSearchComposing) {
 				return;
 			}
 
-			this.updateSearch(searchEl.value);
+			if (searchDebounceTimer !== null) {
+				window.clearTimeout(searchDebounceTimer);
+			}
+			searchDebounceTimer = window.setTimeout(() => {
+				this.updateSearch(searchEl.value);
+			}, 200);
 		});
 		return searchEl;
 	}
@@ -621,8 +659,10 @@ export class MemosView extends ItemView {
 			this.composerValue = value;
 		});
 		textareaEl.value = this.composerValue;
+		this.autosizeTextarea(textareaEl);
 		textareaEl.addEventListener("input", () => {
 			this.composerValue = textareaEl.value;
+			this.autosizeTextarea(textareaEl);
 			if (this.isComposerPreview) {
 				void this.renderComposerPreview(previewEl);
 			}
@@ -722,8 +762,11 @@ export class MemosView extends ItemView {
 	}
 
 	private renderMemoStream(parentEl: HTMLElement, memos: MemoEntry[]): void {
-		parentEl.querySelectorAll(".memos-stream").forEach((el) => el.remove());
+		// 先创建新容器再删除旧 DOM,避免高度坍缩导致的闪动
+		const oldStreams = parentEl.querySelectorAll(".memos-stream");
 		const listEl = parentEl.createDiv({ cls: "memos-stream" });
+		// 新容器已插入 DOM,现在安全删除旧容器
+		oldStreams.forEach((el) => el.remove());
 		if (!memos.length) {
 			const emptyEl = listEl.createDiv({ cls: "memos-empty" });
 			emptyEl.createEl("h3", { text: t("view.noMatchingMemos") });
@@ -750,7 +793,16 @@ export class MemosView extends ItemView {
 				void this.renderMemoCard(listEl, memo);
 			}
 			if (index < visibleMemos.length) {
-				setTimeout(renderBatch, 0);
+				this.scheduleTimeout(renderBatch, 0);
+			} else if (this.forceCompactLayout) {
+				// 所有卡片渲染完成后,在列表底部添加虚线框占位符
+				const hintEl = listEl.createDiv({ cls: "memos-new-memo-hint" });
+				setIcon(hintEl, "plus");
+				// 把回到底部按钮移到内容末尾(sticky bottom 需要正确的 DOM 顺序)
+				const scrollBtn = parentEl.querySelector(":scope > .memos-scroll-to-bottom");
+				if (scrollBtn) {
+					parentEl.appendChild(scrollBtn);
+				}
 			}
 		};
 
@@ -779,6 +831,9 @@ export class MemosView extends ItemView {
 			return;
 		}
 
+		// 保存滚动位置(重建 .memos-stream DOM 会丢失 scrollTop)
+		const savedScrollTop = this.memoStreamContainerEl.scrollTop;
+
 		const viewModel = buildViewModel(
 			this.memos,
 			this.searchTerm,
@@ -790,6 +845,21 @@ export class MemosView extends ItemView {
 		);
 		this.renderMemoStream(this.memoStreamContainerEl, viewModel.filteredMemos);
 		this.updateStickyDayHead();
+
+		// 同步恢复,但卡片是异步分批渲染(setTimeout),后续帧会撑高容器
+		this.memoStreamContainerEl.scrollTop = savedScrollTop;
+		// 用 rAF 在异步渲染期间持续恢复,直到渲染稳定
+		const container = this.memoStreamContainerEl;
+		let frames = 0;
+		const restore = (): void => {
+			if (frames >= 12) {
+				return;
+			}
+			container.scrollTop = savedScrollTop;
+			frames++;
+			this.scheduleFrame(restore);
+		};
+		this.scheduleFrame(restore);
 	}
 
 	private async refreshMemoStream(): Promise<void> {
@@ -798,11 +868,14 @@ export class MemosView extends ItemView {
 			return;
 		}
 
+		// 渲染前记录是否接近底部(用于紧凑视图决定滚动行为)
+		const container = this.memoStreamContainerEl;
+		const wasNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
+
 		this.memos = await loadMemosFromDailyNotes(
 			this.app,
 			this.plugin.getDailyNotesFolder(),
 			this.plugin.settings.timestampFormat,
-			this.plugin.settings.memoStoreMode,
 			this.plugin.settings.memoReadMode,
 			this.plugin.settings.memoReadHeading,
 			this.plugin.settings.boundFilePath || undefined,
@@ -811,6 +884,12 @@ export class MemosView extends ItemView {
 		this.refreshSidebarTagTree();
 		this.refreshSidebarHeatmap();
 		this.renderFilteredMemoStream();
+		this.scrollToNewMemo(wasNearBottom);
+	}
+
+	/** 保存 memo 后滚动到新内容;主视图无操作,紧凑视图重写为滚到底部 */
+	protected scrollToNewMemo(wasNearBottom: boolean): void {
+		// 主视图:保持当前滚动位置,不自动跳转
 	}
 
 	private refreshSidebarHeatmap(): void {
@@ -1029,7 +1108,7 @@ export class MemosView extends ItemView {
 		return true;
 	}
 
-	private createBackToTopButton(parentEl: HTMLElement, bodyEl: HTMLElement): HTMLButtonElement {
+	protected createBackToTopButton(parentEl: HTMLElement, bodyEl: HTMLElement): HTMLButtonElement {
 		const buttonEl = parentEl.createEl("button", {
 			cls: "memos-back-to-top",
 			attr: {
@@ -1042,6 +1121,11 @@ export class MemosView extends ItemView {
 			bodyEl.scrollTo({ top: 0, behavior: "smooth" });
 		});
 		return buttonEl;
+	}
+
+	/** 判断滚动按钮是否可见;主视图:滚动超过 240px 时显示回到顶部 */
+	protected isScrollButtonVisible(bodyEl: HTMLElement): boolean {
+		return bodyEl.scrollTop > 240;
 	}
 
 	private openSortMenu(event: MouseEvent): void {
@@ -1163,6 +1247,7 @@ export class MemosView extends ItemView {
 		const value = textareaEl.value;
 		const beforeSel = value.slice(0, start);
 		const afterSel = value.slice(end);
+		const selectedText = value.slice(start, end);
 		const buttons = toolbarEl.querySelectorAll<HTMLButtonElement>(".memos-selection-toolbar-button:not(.memos-selection-toolbar-clear)");
 		for (let i = 0; i < buttons.length; i++) {
 			const btn = buttons.item(i);
@@ -1171,13 +1256,29 @@ export class MemosView extends ItemView {
 			const suffix = btn.dataset.suffix ?? "";
 			let wrappedBefore = beforeSel.endsWith(prefix);
 			let wrappedAfter = afterSel.startsWith(suffix);
-			if (prefix === "*" && wrappedBefore) {
-				const extra = beforeSel.slice(0, -prefix.length);
-				if (extra.endsWith("*")) wrappedBefore = false;
+			// 选区内部已包含包裹符号(如选中 **文本** 整体)
+			let wrappedInside = selectedText.length >= prefix.length + suffix.length
+				&& selectedText.startsWith(prefix)
+				&& selectedText.endsWith(suffix);
+			// 排除 ** 误匹配 * (加粗不应同时标记为斜体)
+			if (prefix === "*") {
+				if (wrappedBefore) {
+					const extra = beforeSel.slice(0, -prefix.length);
+					if (extra.endsWith("*")) wrappedBefore = false;
+				}
+				if (wrappedInside && selectedText.slice(prefix.length).startsWith("*")) {
+					wrappedInside = false;
+				}
 			}
-			if (prefix === "$" && wrappedBefore) {
-				const extra = beforeSel.slice(0, -prefix.length);
-				if (extra.endsWith("$")) wrappedBefore = false;
+			// 排除 $$ 误匹配 $
+			if (prefix === "$") {
+				if (wrappedBefore) {
+					const extra = beforeSel.slice(0, -prefix.length);
+					if (extra.endsWith("$")) wrappedBefore = false;
+				}
+				if (wrappedInside && selectedText.slice(prefix.length).startsWith("$")) {
+					wrappedInside = false;
+				}
 			}
 			if (suffix === "*" && wrappedAfter) {
 				if (afterSel.length > suffix.length && afterSel.charAt(suffix.length) === "*") wrappedAfter = false;
@@ -1185,7 +1286,7 @@ export class MemosView extends ItemView {
 			if (suffix === "$" && wrappedAfter) {
 				if (afterSel.length > suffix.length && afterSel.charAt(suffix.length) === "$") wrappedAfter = false;
 			}
-			if (wrappedBefore && wrappedAfter) {
+			if ((wrappedBefore && wrappedAfter) || wrappedInside) {
 				btn.addClass("is-active");
 			} else {
 				btn.removeClass("is-active");
@@ -1227,7 +1328,7 @@ export class MemosView extends ItemView {
 			textareaEl.selectionStart ?? textareaEl.value.length,
 			textareaEl.selectionEnd ?? textareaEl.value.length,
 		);
-		document.execCommand("insertText", false, text);
+		insertTextAtCaret(textareaEl, text);
 		if (onChange) {
 			onChange(textareaEl.value);
 		} else {
@@ -1301,17 +1402,7 @@ export class MemosView extends ItemView {
 	}
 
 	private createAttachmentEmbedMarkdown(file: TFile, sourcePath: string): string {
-		const normalizedPath = sourcePath.replace(/\\/g, "/");
-		const sourceDir = normalizedPath.includes("/") ? normalizedPath.slice(0, normalizedPath.lastIndexOf("/")) : "";
-		const targetPath = file.path.replace(/\\/g, "/");
-		const relativePath = sourceDir && targetPath.startsWith(`${sourceDir}/`)
-			? targetPath.slice(sourceDir.length + 1)
-			: targetPath;
-		if (this.plugin.settings.imageEmbedStyle === "markdown") {
-			const fileName = file.basename || file.name;
-			return `\n![${fileName}](${relativePath})\n`;
-		}
-		return `\n![[${relativePath}]]\n`;
+		return buildAttachmentEmbedLink(file, sourcePath, this.plugin.settings.imageEmbedStyle);
 	}
 
 	private getImageExtension(file: File): string {
@@ -1364,7 +1455,7 @@ export class MemosView extends ItemView {
 
 		textareaEl.focus();
 		textareaEl.setSelectionRange(insertStart, insertEnd);
-		document.execCommand("insertText", false, replacement);
+		insertTextAtCaret(textareaEl, replacement);
 
 		if (onChange) {
 			onChange(textareaEl.value);
@@ -1391,7 +1482,7 @@ export class MemosView extends ItemView {
 
 		textareaEl.focus();
 		textareaEl.setSelectionRange(start, end);
-		document.execCommand("insertText", false, cleaned);
+		insertTextAtCaret(textareaEl, cleaned);
 
 		onChange?.(textareaEl.value);
 		textareaEl.setSelectionRange(start, start + cleaned.length);
@@ -1417,7 +1508,7 @@ export class MemosView extends ItemView {
 
 		textareaEl.focus();
 		textareaEl.setSelectionRange(lineStart, lineEnd);
-		document.execCommand("insertText", false, formattedBlock);
+		insertTextAtCaret(textareaEl, formattedBlock);
 
 		onChange?.(textareaEl.value);
 		textareaEl.setSelectionRange(lineStart, lineStart + formattedBlock.length);
@@ -1443,7 +1534,7 @@ export class MemosView extends ItemView {
 
 		textareaEl.focus();
 		textareaEl.setSelectionRange(lineStart, lineEnd);
-		document.execCommand("insertText", false, formattedBlock);
+		insertTextAtCaret(textareaEl, formattedBlock);
 
 		onChange?.(textareaEl.value);
 		textareaEl.setSelectionRange(lineStart, lineStart + formattedBlock.length);
@@ -1455,11 +1546,11 @@ export class MemosView extends ItemView {
 		bodyEl: HTMLElement,
 		backToTopButtonEl: HTMLElement,
 	): void {
-		this.updateBackToTopButtonState(backToTopButtonEl, bodyEl.scrollTop > 240);
+		this.updateBackToTopButtonState(backToTopButtonEl, this.isScrollButtonVisible(bodyEl));
 
 		bodyEl.addEventListener("scroll", () => {
 			this.hasScrolledMemoStream = true;
-			this.updateBackToTopButtonState(backToTopButtonEl, bodyEl.scrollTop > 240);
+			this.updateBackToTopButtonState(backToTopButtonEl, this.isScrollButtonVisible(bodyEl));
 			this.updateStickyDayHead();
 		});
 	}
@@ -1556,7 +1647,7 @@ export class MemosView extends ItemView {
 			this.collapsedTagPaths.add(path);
 		}
 
-		void this.render();
+		this.refreshSidebarTagTree();
 	}
 
 	private expandTagAncestors(tagPath: string): void {
@@ -1596,12 +1687,23 @@ export class MemosView extends ItemView {
 	}
 
 	private getStatusCounts(): Record<MemosStatusFilter, number> {
-		return {
-			all: this.memos.filter((memo) => !memo.archivedAt && !memo.deletedAt).length,
-			active: this.memos.filter((memo) => !memo.archivedAt && !memo.deletedAt).length,
-			archived: this.memos.filter((memo) => Boolean(memo.archivedAt)).length,
-			deleted: this.memos.filter((memo) => Boolean(memo.deletedAt)).length,
-		};
+		let active = 0;
+		let archived = 0;
+		let deleted = 0;
+		for (const memo of this.memos) {
+			const isArchived = Boolean(memo.archivedAt);
+			const isDeleted = Boolean(memo.deletedAt);
+			if (!isArchived && !isDeleted) {
+				active++;
+			}
+			if (isArchived) {
+				archived++;
+			}
+			if (isDeleted) {
+				deleted++;
+			}
+		}
+		return { all: active, active, archived, deleted };
 	}
 
 	private async purgeDeletedMemos(): Promise<void> {
@@ -1999,270 +2101,19 @@ export class MemosView extends ItemView {
 		sourcePath: string,
 		onChange: (value: string) => void,
 	): void {
-		let suggestions: WikilinkSuggestion[] = [];
-		let selectedIndex = 0;
-		let activeContext: WikilinkContext | null = null;
-		let lockedAnchorTargetPath: string | null = null;
-		let syncRequestId = 0;
-		let isComposing = false;
+		const controller = new WikilinkSuggestController(
+			this.app,
+			textareaEl,
+			panelEl,
+			sourcePath,
+			onChange,
+			{ ensureParagraphBlockId: (item) => this.ensureParagraphBlockId(item) },
+		);
+		this.registerWikilinkController(controller);
+	}
 
-		const hidePanel = (): void => {
-			suggestions = [];
-			selectedIndex = 0;
-			activeContext = null;
-			lockedAnchorTargetPath = null;
-			panelEl.empty();
-			panelEl.setAttr("hidden", "hidden");
-		};
-
-		const applySuggestion = async (item: WikilinkSuggestion): Promise<void> => {
-			const contextAtSelection = activeContext;
-			if (!contextAtSelection) {
-				hidePanel();
-				return;
-			}
-
-			if (item.type === "paragraph") {
-				const blockId = await this.ensureParagraphBlockId(item);
-				if (!blockId) {
-					hidePanel();
-					return;
-				}
-
-				const result = applyWikilinkSuggestion(
-					textareaEl.value,
-					contextAtSelection.matchEnd,
-					contextAtSelection,
-					{
-						type: "block",
-						file: item.file,
-						blockId,
-						displayText: `^${blockId}`,
-						path: item.path,
-					},
-				);
-				textareaEl.value = result.newText;
-				onChange(result.newText);
-				hidePanel();
-				textareaEl.focus();
-				textareaEl.setSelectionRange(result.newCursor, result.newCursor);
-				textareaEl.dispatchEvent(new Event("input", { bubbles: true }));
-				return;
-			}
-
-			const result = applyWikilinkSuggestion(
-				textareaEl.value,
-				contextAtSelection.matchEnd,
-				contextAtSelection,
-				item,
-			);
-			textareaEl.value = result.newText;
-			onChange(result.newText);
-			hidePanel();
-			textareaEl.focus();
-			textareaEl.setSelectionRange(result.newCursor, result.newCursor);
-			textareaEl.dispatchEvent(new Event("input", { bubbles: true }));
-		};
-
-		const applyAnchorTransition = (): void => {
-			if (!activeContext || !suggestions.length) {
-				return;
-			}
-
-			const selectedItem = suggestions[selectedIndex];
-			const targetFile = selectedItem?.file ?? null;
-			const baseName = targetFile?.basename ?? (activeContext.filePart.trim() || "");
-			if (!baseName) {
-				return;
-			}
-
-			lockedAnchorTargetPath = targetFile?.path ?? lockedAnchorTargetPath;
-
-			const before = textareaEl.value.slice(0, activeContext.matchStart);
-			const after = textareaEl.value.slice(activeContext.matchEnd);
-			const replacement = `[[${baseName}#`;
-			const nextValue = `${before}${replacement}${after}`;
-			const nextCursor = before.length + replacement.length;
-
-			textareaEl.value = nextValue;
-			onChange(nextValue);
-			textareaEl.focus();
-			textareaEl.setSelectionRange(nextCursor, nextCursor);
-			textareaEl.dispatchEvent(new Event("input", { bubbles: true }));
-		};
-
-		const renderPanel = (): void => {
-			panelEl.empty();
-			if (!suggestions.length) {
-				panelEl.setAttr("hidden", "hidden");
-				panelEl.style.removeProperty("left");
-				panelEl.style.removeProperty("top");
-				return;
-			}
-
-			panelEl.removeAttribute("hidden");
-			this.positionWikilinkSuggestPanel(textareaEl, panelEl);
-			suggestions.forEach((item, index) => {
-				const itemEl = panelEl.createEl("button", {
-					cls: `memos-wikilink-suggest-item${index === selectedIndex ? " is-selected" : ""}`,
-					attr: {
-						type: "button",
-						"aria-label": item.path,
-					},
-				});
-				itemEl.addEventListener("mousedown", (event) => {
-					event.preventDefault();
-					void applySuggestion(item);
-				});
-
-				const typeEl = itemEl.createSpan({ cls: "memos-wikilink-suggest-type" });
-				typeEl.setText(
-					item.type === "file"
-						? t("view.wikilinkFile")
-						: item.type === "heading"
-							? t("view.wikilinkHeading")
-							: item.type === "paragraph"
-								? t("view.wikilinkParagraph")
-								: t("view.wikilinkBlock"),
-				);
-
-				const contentEl = itemEl.createSpan({ cls: "memos-wikilink-suggest-content" });
-				contentEl.createSpan({
-					cls: "memos-wikilink-suggest-title",
-					text: item.displayText,
-				});
-				contentEl.createSpan({
-					cls: "memos-wikilink-suggest-path",
-					text: item.path,
-				});
-			});
-
-			const selectedItemEl = panelEl.querySelector(".memos-wikilink-suggest-item.is-selected");
-			if (selectedItemEl instanceof HTMLElement) {
-				selectedItemEl.scrollIntoView({
-					block: "nearest",
-				});
-			}
-		};
-
-		const syncPanel = async (): Promise<void> => {
-			const requestId = ++syncRequestId;
-			const cursor = textareaEl.selectionStart ?? textareaEl.value.length;
-			const context = parseWikilinkContext(textareaEl.value, cursor);
-			if (!context) {
-				hidePanel();
-				return;
-			}
-
-			if (!context.separator) {
-				lockedAnchorTargetPath = null;
-			} else if (lockedAnchorTargetPath) {
-				const lockedTargetFile = this.app.vault.getAbstractFileByPath(lockedAnchorTargetPath);
-				if (
-					!(lockedTargetFile instanceof TFile) ||
-					(context.filePart.trim() &&
-						context.filePart.trim() !== lockedTargetFile.basename &&
-						context.filePart.trim() !== lockedTargetFile.path)
-				) {
-					lockedAnchorTargetPath = null;
-				}
-			}
-
-			const normalizedContext = expandEmptyAnchorToCurrentFile(this.app, context, sourcePath);
-			const nextSuggestions = await getWikilinkSuggestions(
-				this.app,
-				normalizedContext,
-				sourcePath,
-				lockedAnchorTargetPath,
-			);
-			if (requestId !== syncRequestId) {
-				return;
-			}
-			if (!nextSuggestions.length) {
-				hidePanel();
-				return;
-			}
-
-			activeContext = context;
-			suggestions = nextSuggestions;
-			selectedIndex = Math.min(selectedIndex, suggestions.length - 1);
-			renderPanel();
-		};
-
-		textareaEl.addEventListener("compositionstart", () => {
-			isComposing = true;
-		});
-		textareaEl.addEventListener("compositionend", () => {
-			isComposing = false;
-			this.normalizeTextareaWikilinkInput(textareaEl, onChange);
-			void syncPanel();
-		});
-		textareaEl.addEventListener("input", () => {
-			if (!isComposing) {
-				this.normalizeTextareaWikilinkInput(textareaEl, onChange);
-			}
-			void syncPanel();
-		});
-		textareaEl.addEventListener("click", () => {
-			void syncPanel();
-		});
-		textareaEl.addEventListener("keyup", (event) => {
-			if (event.key === "ArrowUp" || event.key === "ArrowDown" || event.key === "Enter" || event.key === "Tab") {
-				return;
-			}
-			void syncPanel();
-		});
-		textareaEl.addEventListener("blur", () => {
-			window.setTimeout(() => {
-				if (document.activeElement === textareaEl) {
-					return;
-				}
-				hidePanel();
-			}, 80);
-		});
-		textareaEl.addEventListener("keydown", (event) => {
-			if (event.key === "Escape") {
-				event.preventDefault();
-				event.stopPropagation();
-				hidePanel();
-				return;
-			}
-
-			if (!suggestions.length) {
-				return;
-			}
-
-			if (event.key === "ArrowDown") {
-				event.preventDefault();
-				selectedIndex = (selectedIndex + 1) % suggestions.length;
-				renderPanel();
-				return;
-			}
-
-			if (event.key === "ArrowUp") {
-				event.preventDefault();
-				selectedIndex = (selectedIndex - 1 + suggestions.length) % suggestions.length;
-				renderPanel();
-				return;
-			}
-
-			if (this.isWikilinkAnchorShortcut(event) && activeContext?.separator === "") {
-				event.preventDefault();
-				applyAnchorTransition();
-				return;
-			}
-
-			if (event.key === "Enter" || event.key === "Tab") {
-				event.preventDefault();
-				const selectedSuggestion = suggestions[selectedIndex];
-				if (!selectedSuggestion) {
-					hidePanel();
-					return;
-				}
-				void applySuggestion(selectedSuggestion);
-				return;
-			}
-		});
+	private registerWikilinkController(controller: WikilinkSuggestController): void {
+		this.wikilinkControllers.push(controller);
 	}
 
 	private async ensureParagraphBlockId(
@@ -2286,69 +2137,6 @@ export class MemosView extends ItemView {
 		this.plugin.suppressVaultRefresh(file.path);
 		await this.app.vault.modify(file, nextContent);
 		return blockId;
-	}
-
-	private isWikilinkAnchorShortcut(event: KeyboardEvent): boolean {
-		if (event.key === "#") {
-			return true;
-		}
-
-		if (event.shiftKey && event.code === "Digit3") {
-			return true;
-		}
-
-		return false;
-	}
-
-	private normalizeTextareaWikilinkInput(
-		textareaEl: HTMLTextAreaElement,
-		onChange: (value: string) => void,
-	): boolean {
-		const cursor = textareaEl.selectionStart ?? textareaEl.value.length;
-		let value = textareaEl.value;
-		let nextCursor = cursor;
-		let changed = false;
-
-		if (cursor >= 2 && value.slice(cursor - 2, cursor) === "【【") {
-			value = `${value.slice(0, cursor - 2)}[[${value.slice(cursor)}`;
-			changed = true;
-		}
-
-		if (cursor >= 3 && value.slice(cursor - 3, cursor) === "#……") {
-			value = `${value.slice(0, cursor - 3)}#^${value.slice(cursor)}`;
-			nextCursor -= 1;
-			changed = true;
-		}
-
-		if (!changed) {
-			return false;
-		}
-
-		textareaEl.value = value;
-		onChange(value);
-		textareaEl.setSelectionRange(nextCursor, nextCursor);
-		return true;
-	}
-
-	private positionWikilinkSuggestPanel(
-		textareaEl: HTMLTextAreaElement,
-		panelEl: HTMLElement,
-	): void {
-		const caretOffset = this.measureTextareaCaretOffset(textareaEl);
-		const horizontalPadding = 12;
-		const verticalGap = 8;
-		const maxPanelWidth = Math.min(420, Math.max(260, textareaEl.clientWidth - horizontalPadding * 2));
-		const panelWidth = Math.min(maxPanelWidth, textareaEl.clientWidth);
-		const maxLeft = Math.max(horizontalPadding, textareaEl.clientWidth - panelWidth);
-		const nextLeft = Math.min(Math.max(caretOffset.left, horizontalPadding), maxLeft);
-		const nextTop = Math.min(
-			Math.max(caretOffset.top + caretOffset.lineHeight + verticalGap, verticalGap),
-			Math.max(verticalGap, textareaEl.clientHeight - 16),
-		);
-
-		panelEl.style.width = `${panelWidth}px`;
-		panelEl.style.left = `${nextLeft}px`;
-		panelEl.style.top = `${nextTop}px`;
 	}
 
 	private measureTextareaCaretOffset(
@@ -2483,7 +2271,7 @@ export class MemosView extends ItemView {
 			const replacement = `${tag} `;
 			textareaEl.focus();
 			textareaEl.setSelectionRange(tagStart, textareaEl.selectionStart ?? tagStart);
-			document.execCommand("insertText", false, replacement);
+			insertTextAtCaret(textareaEl, replacement);
 			onChange(textareaEl.value);
 			hidePanel();
 		};
@@ -2682,6 +2470,7 @@ export class MemosView extends ItemView {
 		const textareaEl = this.contentEl.find(".memos-composer-input");
 		if (textareaEl instanceof HTMLTextAreaElement) {
 			textareaEl.value = "";
+			this.autosizeTextarea(textareaEl);
 		}
 	}
 
@@ -2740,6 +2529,7 @@ export class MemosView extends ItemView {
 		const textareaEl = this.contentEl.querySelector(".memos-composer-input") as HTMLTextAreaElement | null;
 		if (textareaEl) {
 			textareaEl.value = this.composerValue;
+			this.autosizeTextarea(textareaEl);
 			textareaEl.focus();
 			textareaEl.setSelectionRange(this.composerValue.length, this.composerValue.length);
 		}
@@ -2753,129 +2543,6 @@ export class MemosView extends ItemView {
 		}
 		new Notice(memo.deletedAt ? t("notices.memoRestored") : t("notices.memoDeleted"));
 		await this.refreshMemoStream();
-	}
-}
-
-class MemosRandomWalkModal extends Modal {
-	private readonly view: MemosView;
-	private readonly memos: MemoEntry[];
-	private currentMemo: MemoEntry | null = null;
-
-	constructor(view: MemosView, memos: MemoEntry[]) {
-		super(view.app);
-		this.view = view;
-		this.memos = memos;
-	}
-
-	onOpen(): void {
-		this.modalEl.addClass("memos-random-walk-modal");
-		this.contentEl.empty();
-		void this.showRandomMemo();
-	}
-
-	onClose(): void {
-		this.contentEl.empty();
-		this.modalEl.removeClass("memos-random-walk-modal");
-	}
-
-	private async showRandomMemo(): Promise<void> {
-		const nextMemo = this.pickRandomMemo();
-		if (!nextMemo) {
-			new Notice(t("notices.noMemosForRandomWalk"));
-			this.close();
-			return;
-		}
-
-		this.currentMemo = nextMemo;
-		await this.renderCurrentMemo();
-	}
-
-	private pickRandomMemo(): MemoEntry | null {
-		if (!this.memos.length) {
-			return null;
-		}
-
-		if (this.memos.length === 1) {
-			return this.memos[0] ?? null;
-		}
-
-		let candidate = this.memos[Math.floor(Math.random() * this.memos.length)] ?? null;
-		let attempts = 0;
-		while (candidate && this.currentMemo && candidate.id === this.currentMemo.id && attempts < 6) {
-			candidate = this.memos[Math.floor(Math.random() * this.memos.length)] ?? null;
-			attempts += 1;
-		}
-
-		return candidate;
-	}
-
-	private async renderCurrentMemo(): Promise<void> {
-		if (!this.currentMemo) {
-			return;
-		}
-
-		const memo = this.currentMemo;
-		this.contentEl.empty();
-
-		const shellEl = this.contentEl.createDiv({ cls: "memos-random-walk-shell" });
-
-		const headerEl = shellEl.createDiv({ cls: "memos-random-walk-header" });
-		const eyebrowEl = headerEl.createDiv({ cls: "memos-random-walk-eyebrow" });
-		eyebrowEl.createSpan({ text: t("view.randomWalk") });
-		eyebrowEl.createSpan({ cls: "memos-random-walk-slash", text: "/" });
-		eyebrowEl.createSpan({ text: memo.dayKey });
-
-		const titleRowEl = headerEl.createDiv({ cls: "memos-random-walk-title-row" });
-		titleRowEl.createEl("h2", { text: memo.sourceBasename });
-		const titleActionsEl = titleRowEl.createDiv({ cls: "memos-random-walk-title-actions" });
-		const openFileButtonEl = titleActionsEl.createEl("button", {
-			cls: "memos-random-walk-next",
-			attr: { type: "button", "aria-label": t("view.openSourceFile") },
-		});
-		setIcon(openFileButtonEl, "file-pen");
-		openFileButtonEl.addEventListener("click", () => {
-			void this.openSourceAndClose(memo);
-		});
-		const shuffleButtonEl = titleActionsEl.createEl("button", {
-			cls: "memos-random-walk-next",
-			attr: { type: "button", "aria-label": t("view.nextRandomMemo") },
-		});
-		setIcon(shuffleButtonEl, "shuffle");
-		shuffleButtonEl.addEventListener("click", () => {
-			void this.showRandomMemo();
-		});
-
-		const metaEl = shellEl.createDiv({ cls: "memos-random-walk-meta" });
-		this.createMetaPill(metaEl, "clock-3", memo.createdLabel);
-		if (memo.archivedAt) {
-			this.createMetaPill(metaEl, "archive", t("view.archived"));
-		}
-		if (memo.deletedAt) {
-			this.createMetaPill(metaEl, "trash-2", t("view.deleted"));
-		}
-		memo.tags.slice(0, 6).forEach((tag) => {
-			this.createMetaPill(metaEl, "hash", tag.replace(/^#/, ""));
-		});
-
-		const bodyEl = shellEl.createDiv({ cls: "memos-random-walk-body markdown-rendered" });
-		await MarkdownRenderer.render(this.app, memo.content, bodyEl, memo.sourcePath, this.view);
-		this.view.bindRenderedInternalLinks(bodyEl, memo.sourcePath);
-
-		const footerEl = shellEl.createDiv({ cls: "memos-random-walk-footer" });
-		const sourceInfoEl = footerEl.createDiv({ cls: "memos-random-walk-source" });
-		sourceInfoEl.createSpan({ text: memo.sourcePath });
-	}
-
-	private createMetaPill(parentEl: HTMLElement, icon: string, label: string): void {
-		const pillEl = parentEl.createDiv({ cls: "memos-random-walk-pill" });
-		const iconEl = pillEl.createSpan({ cls: "memos-random-walk-pill-icon" });
-		setIcon(iconEl, icon);
-		pillEl.createSpan({ text: label });
-	}
-
-	private async openSourceAndClose(memo: MemoEntry): Promise<void> {
-		await this.view.openMemoSourceAtLine(memo);
-		this.close();
 	}
 }
 
@@ -2918,7 +2585,7 @@ function formatReadableDay(dayKey: string): string {
 	}
 
 	const date = new Date(`${dayKey}T00:00:00`);
-	const weekdays = t("view.dayToday") === "今天" ? WEEKDAY_NAMES_ZH : WEEKDAY_NAMES_EN;
+	const weekdays = isZhLocale() ? WEEKDAY_NAMES_ZH : WEEKDAY_NAMES_EN;
 	const weekday = weekdays[date.getDay()] ?? "";
 	return t("view.dayLabel", dayKey, weekday);
 }
@@ -3010,138 +2677,4 @@ function mapToNodes(nodes: Map<string, MutableTagTreeNode>): TagTreeNode[] {
 	});
 
 	return result.sort((left, right) => left.name.localeCompare(right.name, undefined, { numeric: true }));
-}
-
-const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "bmp", "svg", "webp"]);
-
-class AttachmentPickerModal extends Modal {
-	private readonly onSelect: (markdownLink: string) => void;
-	private readonly sourcePath: string;
-	private readonly embedStyle: "wikilink" | "markdown";
-	private searchInput: HTMLInputElement | null = null;
-	private gridEl: HTMLElement | null = null;
-	private allFiles: TFile[] = [];
-	private filteredFiles: TFile[] = [];
-
-	constructor(app: App, sourcePath: string, embedStyle: "wikilink" | "markdown", onSelect: (markdownLink: string) => void) {
-		super(app);
-		this.sourcePath = sourcePath;
-		this.embedStyle = embedStyle;
-		this.onSelect = onSelect;
-	}
-
-	onOpen(): void {
-		this.modalEl.addClass("memos-attachment-picker-modal");
-		this.contentEl.empty();
-		this.allFiles = this.collectAttachmentFiles();
-		this.filteredFiles = this.allFiles;
-
-		const headerEl = this.contentEl.createDiv({ cls: "memos-attachment-picker-header" });
-		this.searchInput = headerEl.createEl("input", {
-			type: "search",
-			cls: "memos-attachment-picker-search",
-			placeholder: t("view.attachmentPickerSearch"),
-			attr: { autocomplete: "off" },
-		});
-		this.searchInput.addEventListener("input", () => {
-			this.filterFiles(this.searchInput?.value ?? "");
-		});
-		this.searchInput.addEventListener("compositionend", () => {
-			this.filterFiles(this.searchInput?.value ?? "");
-		});
-
-		this.gridEl = this.contentEl.createDiv({ cls: "memos-attachment-picker-grid" });
-		this.renderGrid();
-
-		window.setTimeout(() => {
-			this.searchInput?.focus();
-		}, 0);
-	}
-
-	onClose(): void {
-		this.contentEl.empty();
-		this.modalEl.removeClass("memos-attachment-picker-modal");
-	}
-
-	private collectAttachmentFiles(): TFile[] {
-		const files = this.app.vault.getFiles();
-		return files
-			.filter((file) => {
-				const ext = file.extension.toLowerCase();
-				return IMAGE_EXTENSIONS.has(ext);
-			})
-			.sort((a, b) => b.stat.mtime - a.stat.mtime);
-	}
-
-	private filterFiles(query: string): void {
-		const q = query.trim().toLowerCase();
-		if (!q) {
-			this.filteredFiles = this.allFiles;
-		} else {
-			this.filteredFiles = this.allFiles.filter((file) => {
-				return file.path.toLowerCase().includes(q) || file.name.toLowerCase().includes(q);
-			});
-		}
-		this.renderGrid();
-	}
-
-	private renderGrid(): void {
-		if (!this.gridEl) return;
-		this.gridEl.empty();
-
-		if (!this.filteredFiles.length) {
-			this.gridEl.createDiv({ cls: "memos-attachment-picker-empty", text: t("view.attachmentPickerEmpty") });
-			return;
-		}
-
-		for (const file of this.filteredFiles) {
-			const itemEl = this.gridEl.createDiv({ cls: "memos-attachment-picker-item" });
-			itemEl.addEventListener("click", () => {
-				this.selectFile(file);
-			});
-
-			const thumbEl = itemEl.createDiv({ cls: "memos-attachment-picker-thumb" });
-			this.renderThumbnail(thumbEl, file);
-
-			const nameEl = itemEl.createDiv({ cls: "memos-attachment-picker-name", text: file.name });
-			itemEl.title = file.path;
-		}
-	}
-
-	private renderThumbnail(containerEl: HTMLElement, file: TFile): void {
-		const maxWidth = 120;
-		const maxHeight = 90;
-		const imgEl = containerEl.createEl("img", {
-			attr: {
-				src: this.app.vault.getResourcePath(file),
-				alt: file.name,
-				loading: "lazy",
-			},
-		});
-		imgEl.addEventListener("load", () => {
-			const ratio = Math.min(maxWidth / imgEl.naturalWidth, maxHeight / imgEl.naturalHeight, 1);
-			imgEl.style.width = `${Math.round(imgEl.naturalWidth * ratio)}px`;
-			imgEl.style.height = `${Math.round(imgEl.naturalHeight * ratio)}px`;
-		});
-	}
-
-	private selectFile(file: TFile): void {
-		const markdownLink = this.buildEmbedLink(file);
-		this.onSelect(markdownLink);
-		this.close();
-	}
-
-	private buildEmbedLink(file: TFile): string {
-		const normalizedPath = this.sourcePath.replace(/\\/g, "/");
-		const sourceDir = normalizedPath.includes("/") ? normalizedPath.slice(0, normalizedPath.lastIndexOf("/")) : "";
-		const targetPath = file.path.replace(/\\/g, "/");
-		const relativePath = sourceDir && targetPath.startsWith(`${sourceDir}/`)
-			? targetPath.slice(sourceDir.length + 1)
-			: targetPath;
-		if (this.embedStyle === "markdown") {
-			const fileName = file.basename || file.name;
-			return `\n![${fileName}](${relativePath})\n`;
-		}
-		return `\n![[${relativePath}]]\n`;
-	}
 }

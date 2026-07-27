@@ -1,8 +1,8 @@
-import { normalizePath } from "obsidian";
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type MemosViewPlugin from "./main";
 import type { MemosPluginSettings } from "./types";
 import { t } from "./i18n";
+import { normalizeBoundPath } from "./utils/path";
 
 export const DEFAULT_SETTINGS: MemosPluginSettings = {
 	boundFilePath: "",
@@ -161,15 +161,6 @@ export class MemosSettingTab extends PluginSettingTab {
 				);
 		}
 	}
-}
-
-function normalizeBoundPath(path: string): string {
-	const trimmed = path.trim();
-	if (!trimmed) {
-		return "";
-	}
-
-	return normalizePath(trimmed.replace(/\\/g, "/"));
 }
 
 function normalizeTimestampFormat(format: string): string {

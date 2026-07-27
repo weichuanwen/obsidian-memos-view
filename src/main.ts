@@ -1,18 +1,24 @@
 import { MarkdownView, Notice, Plugin, TFile, WorkspaceLeaf, normalizePath } from "obsidian";
 import {
-	createMemoStatusTimestamp,
 	getMemoBlockRanges,
-	parseMemoBlock,
-	type MemoStatusKey,
 	serializeMemoBlock,
-	setMemoStatusValue,
 	splitFrontmatter,
 } from "./memos/parser";
+import {
+	buildNextMemoStatus,
+	composeFileContent,
+	readFileForRewrite,
+	removeBlockFromRange,
+	rewriteMemoBlock,
+} from "./memos/memoWriter";
 import { MemosView } from "./memos/memosView";
+import { MemosSidebarView } from "./memos/memosSidebarView";
 import { DEFAULT_SETTINGS, MemosSettingTab } from "./settings";
-import { VIEW_TYPE_MEMOS } from "./types";
+import { VIEW_TYPE_MEMOS, VIEW_TYPE_MEMOS_SIDEBAR } from "./types";
 import type { DailyNotesConfig, MemoEntry, MemosPluginSettings } from "./types";
+import type { MemoStatusKey } from "./memos/parser";
 import { t } from "./i18n";
+import { normalizeBoundPath } from "./utils/path";
 
 export default class MemosViewPlugin extends Plugin {
 	settings: MemosPluginSettings = DEFAULT_SETTINGS;
@@ -27,6 +33,10 @@ export default class MemosViewPlugin extends Plugin {
 		this.registerView(
 			VIEW_TYPE_MEMOS,
 			(leaf) => new MemosView(leaf, this),
+		);
+		this.registerView(
+			VIEW_TYPE_MEMOS_SIDEBAR,
+			(leaf) => new MemosSidebarView(leaf, this),
 		);
 		this.registerHoverLinkSource(VIEW_TYPE_MEMOS, {
 			display: "Memos",
@@ -46,10 +56,10 @@ export default class MemosViewPlugin extends Plugin {
 		});
 
 		this.addCommand({
-			id: "refresh-memos-view",
-			name: t("commands.refreshMemosView"),
+			id: "open-memos-sidebar",
+			name: t("commands.openMemosSidebar"),
 			callback: () => {
-				void this.refreshAllMemosViews();
+				void this.activateMemosSidebarView();
 			},
 		});
 
@@ -88,7 +98,10 @@ export default class MemosViewPlugin extends Plugin {
 			this.pendingBoundFileTimer = null;
 		}
 
-		const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_MEMOS);
+		const leaves = [
+			...this.app.workspace.getLeavesOfType(VIEW_TYPE_MEMOS),
+			...this.app.workspace.getLeavesOfType(VIEW_TYPE_MEMOS_SIDEBAR),
+		];
 		for (const leaf of leaves) {
 			await leaf.setViewState({ type: "empty" });
 		}
@@ -108,7 +121,7 @@ export default class MemosViewPlugin extends Plugin {
 		});
 		this.settings = {
 			...data,
-			boundFilePath: this.normalizeBoundPath(data.boundFilePath),
+			boundFilePath: normalizeBoundPath(data.boundFilePath),
 		};
 	}
 
@@ -117,7 +130,12 @@ export default class MemosViewPlugin extends Plugin {
 	}
 
 	async activateMemosView(boundFilePath?: string, leaf?: WorkspaceLeaf): Promise<void> {
-		const targetLeaf = leaf ?? this.app.workspace.getLeaf(false);
+		// 未指定 leaf 时优先复用已存在的视图,避免出现重复的 memos-view
+		let targetLeaf: WorkspaceLeaf | null = leaf ?? null;
+		if (!targetLeaf) {
+			const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_MEMOS);
+			targetLeaf = existing[0] ?? this.app.workspace.getLeaf(false);
+		}
 		if (!targetLeaf) {
 			new Notice(t("notices.noWorkspaceLeaf"));
 			return;
@@ -131,8 +149,26 @@ export default class MemosViewPlugin extends Plugin {
 		this.app.workspace.revealLeaf(targetLeaf);
 	}
 
+	async activateMemosSidebarView(): Promise<void> {
+		const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_MEMOS_SIDEBAR);
+		const targetLeaf = existing[0] ?? this.app.workspace.getRightLeaf(false);
+		if (!targetLeaf) {
+			new Notice(t("notices.noWorkspaceLeaf"));
+			return;
+		}
+
+		await targetLeaf.setViewState({
+			type: VIEW_TYPE_MEMOS_SIDEBAR,
+			active: true,
+		});
+		this.app.workspace.revealLeaf(targetLeaf);
+	}
+
 	async refreshAllMemosViews(): Promise<void> {
-		const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_MEMOS);
+		const leaves = [
+			...this.app.workspace.getLeavesOfType(VIEW_TYPE_MEMOS),
+			...this.app.workspace.getLeavesOfType(VIEW_TYPE_MEMOS_SIDEBAR),
+		];
 		await Promise.all(
 			leaves.map(async (leaf) => {
 				if (leaf.view instanceof MemosView) {
@@ -176,24 +212,6 @@ export default class MemosViewPlugin extends Plugin {
 		const leaf = this.app.workspace.getLeaf(false);
 		if (!leaf) {
 			new Notice(t("notices.noWorkspaceLeaf"));
-			return;
-		}
-
-		const leafWithOpenFile = leaf as WorkspaceLeaf & {
-			openFile?: (
-				file: TFile,
-				options?: {
-					eState?: { line: number; mode: string };
-				},
-			) => Promise<void>;
-		};
-		if (leafWithOpenFile.openFile) {
-			await leafWithOpenFile.openFile(file, {
-				eState: {
-					line,
-					mode: "source",
-				},
-			});
 			return;
 		}
 
@@ -283,108 +301,114 @@ export default class MemosViewPlugin extends Plugin {
 			return;
 		}
 
-		const timestampLabel = this.formatTimeByPattern(new Date(), this.settings.timestampFormat);
-		const payload = serializeMemoBlock(normalized, timestampLabel);
+		try {
+			const timestampLabel = this.formatTimeByPattern(new Date(), this.settings.timestampFormat);
+			const payload = serializeMemoBlock(normalized, timestampLabel);
 
-		if (this.settings.memoStoreMode === "yearly") {
-			await this.appendMemoToYearlyFile(payload, options);
-			return;
-		}
+			if (this.settings.memoStoreMode === "yearly") {
+				await this.appendMemoToYearlyFile(payload, options);
+				return;
+			}
 
-		const folder = this.getDailyNotesFolder();
-		const fileName = this.formatDateByPattern(new Date(), this.dailyNotesConfig?.format ?? "YYYY-MM-DD");
-		const filePath = normalizePath(folder ? `${folder}/${fileName}.md` : `${fileName}.md`);
-		const existing = this.app.vault.getAbstractFileByPath(filePath);
+			const folder = this.getDailyNotesFolder();
+			const fileName = this.formatDateByPattern(new Date(), this.dailyNotesConfig?.format ?? "YYYY-MM-DD");
+			const filePath = normalizePath(folder ? `${folder}/${fileName}.md` : `${fileName}.md`);
+			const existing = this.app.vault.getAbstractFileByPath(filePath);
 
-		if (existing instanceof TFile) {
-			const rawContent = await this.app.vault.cachedRead(existing);
-			const { frontmatter, body } = splitFrontmatter(rawContent);
-			const normalizedBody = body.replace(/\r\n/g, "\n").trim();
-			let nextBody: string;
-			const storeHeading = this.settings.memoStoreHeading.trim();
-			if (storeHeading) {
-				nextBody = this.insertPayloadUnderHeading(normalizedBody, payload, storeHeading);
+			if (existing instanceof TFile) {
+				const rawContent = await this.app.vault.cachedRead(existing);
+				const { frontmatter, body } = splitFrontmatter(rawContent);
+				const normalizedBody = body.replace(/\r\n/g, "\n").trim();
+				let nextBody: string;
+				const storeHeading = this.settings.memoStoreHeading.trim();
+				if (storeHeading) {
+					nextBody = this.insertPayloadUnderHeading(normalizedBody, payload, storeHeading);
+				} else {
+					nextBody = normalizedBody ? `${payload}\n\n${normalizedBody}` : payload;
+				}
+				const nextFileContent = composeFileContent(frontmatter, nextBody);
+				this.suppressVaultRefresh(existing.path);
+				await this.app.vault.modify(existing, nextFileContent);
 			} else {
-				nextBody = normalizedBody ? `${payload}\n\n${normalizedBody}` : payload;
+				if (folder) {
+					await this.app.vault.createFolder(folder).catch(() => undefined);
+				}
+				const storeHeading = this.settings.memoStoreHeading.trim();
+				const fileContent = storeHeading ? `${storeHeading}\n\n${payload}\n` : payload;
+				this.suppressVaultRefresh(filePath);
+				await this.app.vault.create(filePath, fileContent);
 			}
-			const nextFileContent = frontmatter
-				? `${frontmatter}\n\n${nextBody}`
-				: nextBody;
-			this.suppressVaultRefresh(existing.path);
-			await this.app.vault.modify(existing, nextFileContent);
-		} else {
-			if (folder) {
-				await this.app.vault.createFolder(folder).catch(() => undefined);
-			}
-			const storeHeading = this.settings.memoStoreHeading.trim();
-			const fileContent = storeHeading ? `${storeHeading}\n\n${payload}\n` : payload;
-			this.suppressVaultRefresh(filePath);
-			await this.app.vault.create(filePath, fileContent);
-		}
 
-		if (options.refresh !== false) {
-			await this.refreshAllMemosViews();
+			if (options.refresh !== false) {
+				await this.refreshAllMemosViews();
+			}
+		} catch (error) {
+			console.error("Failed to append memo", error);
+			new Notice(t("notices.memoUpdateFailed"));
 		}
 	}
 
 	private async appendMemoToYearlyFile(payload: string, options: { refresh?: boolean }): Promise<void> {
-		const now = new Date();
-		const filePath = this.getYearlyNotePath(now);
-		const year = String(now.getFullYear());
-		const dayHeading = this.getYearlyDayHeading(now);
-		const existing = this.app.vault.getAbstractFileByPath(filePath);
+		try {
+			const now = new Date();
+			const filePath = this.getYearlyNotePath(now);
+			const year = String(now.getFullYear());
+			const dayHeading = this.getYearlyDayHeading(now);
+			const existing = this.app.vault.getAbstractFileByPath(filePath);
 
-		if (existing instanceof TFile) {
-			const rawContent = await this.app.vault.cachedRead(existing);
-			const { frontmatter, body } = splitFrontmatter(rawContent);
-			const normalizedBody = body.replace(/\r\n/g, "\n").trim();
-			const sectionBlock = `\n${payload}\n`;
-			const headingIndex = normalizedBody.indexOf(dayHeading);
-			let nextBody: string;
-			if (headingIndex === -1) {
-				const yearHeading = `# ${year}`;
-				const yearHeadingIndex = normalizedBody.indexOf(yearHeading);
-				if (yearHeadingIndex !== -1) {
-					const afterYearHeading = yearHeadingIndex + yearHeading.length;
-					const afterYearHeadingText = normalizedBody.slice(afterYearHeading);
-					const nextH2Match = afterYearHeadingText.search(/\n## /);
-					let insertPos: number;
-					if (nextH2Match !== -1) {
-						insertPos = afterYearHeading + nextH2Match;
+			if (existing instanceof TFile) {
+				const rawContent = await this.app.vault.cachedRead(existing);
+				const { frontmatter, body } = splitFrontmatter(rawContent);
+				const normalizedBody = body.replace(/\r\n/g, "\n").trim();
+				const sectionBlock = `\n${payload}\n`;
+				const headingIndex = normalizedBody.indexOf(dayHeading);
+				let nextBody: string;
+				if (headingIndex === -1) {
+					const yearHeading = `# ${year}`;
+					const yearHeadingIndex = normalizedBody.indexOf(yearHeading);
+					if (yearHeadingIndex !== -1) {
+						const afterYearHeading = yearHeadingIndex + yearHeading.length;
+						const afterYearHeadingText = normalizedBody.slice(afterYearHeading);
+						const nextH2Match = afterYearHeadingText.search(/\n## /);
+						let insertPos: number;
+						if (nextH2Match !== -1) {
+							insertPos = afterYearHeading + nextH2Match;
+						} else {
+							insertPos = normalizedBody.length;
+						}
+						const before = normalizedBody.slice(0, insertPos);
+						const after = normalizedBody.slice(insertPos);
+						nextBody = `${before}\n\n${dayHeading}\n${sectionBlock}\n${after}`.replace(/\n{3,}/g, "\n\n");
 					} else {
-						insertPos = normalizedBody.length;
+						nextBody = `# ${year}\n\n${dayHeading}\n${sectionBlock}\n${normalizedBody ? normalizedBody : ""}`.trim();
 					}
-					const before = normalizedBody.slice(0, insertPos);
-					const after = normalizedBody.slice(insertPos);
-					nextBody = `${before}\n\n${dayHeading}\n${sectionBlock}\n${after}`.replace(/\n{3,}/g, "\n\n");
 				} else {
-					nextBody = `# ${year}\n\n${dayHeading}\n${sectionBlock}\n${normalizedBody ? normalizedBody : ""}`.trim();
+					const afterHeading = headingIndex + dayHeading.length;
+					const nextHeadingMatch = normalizedBody.slice(afterHeading).search(/\n## /);
+					const sectionEnd = nextHeadingMatch === -1 ? normalizedBody.length : afterHeading + nextHeadingMatch;
+					const beforeSection = normalizedBody.slice(0, sectionEnd);
+					const afterSection = normalizedBody.slice(sectionEnd);
+					nextBody = `${beforeSection}\n${payload}\n${afterSection}`;
 				}
+				const nextFileContent = composeFileContent(frontmatter, nextBody);
+				this.suppressVaultRefresh(existing.path);
+				await this.app.vault.modify(existing, nextFileContent);
 			} else {
-				const afterHeading = headingIndex + dayHeading.length;
-				const nextHeadingMatch = normalizedBody.slice(afterHeading).search(/\n## /);
-				const sectionEnd = nextHeadingMatch === -1 ? normalizedBody.length : afterHeading + nextHeadingMatch;
-				const beforeSection = normalizedBody.slice(0, sectionEnd);
-				const afterSection = normalizedBody.slice(sectionEnd);
-				nextBody = `${beforeSection}\n${payload}\n${afterSection}`;
+				const folder = this.getDailyNotesFolder();
+				if (folder) {
+					await this.app.vault.createFolder(folder).catch(() => undefined);
+				}
+				const fileContent = `# ${year}\n\n${dayHeading}\n\n${payload}\n`;
+				this.suppressVaultRefresh(filePath);
+				await this.app.vault.create(filePath, fileContent);
 			}
-			const nextFileContent = frontmatter
-				? `${frontmatter}\n\n${nextBody}`
-				: nextBody;
-			this.suppressVaultRefresh(existing.path);
-			await this.app.vault.modify(existing, nextFileContent);
-		} else {
-			const folder = this.getDailyNotesFolder();
-			if (folder) {
-				await this.app.vault.createFolder(folder).catch(() => undefined);
-			}
-			const fileContent = `# ${year}\n\n${dayHeading}\n\n${payload}\n`;
-			this.suppressVaultRefresh(filePath);
-			await this.app.vault.create(filePath, fileContent);
-		}
 
-		if (options.refresh !== false) {
-			await this.refreshAllMemosViews();
+			if (options.refresh !== false) {
+				await this.refreshAllMemosViews();
+			}
+		} catch (error) {
+			console.error("Failed to append memo to yearly file", error);
+			new Notice(t("notices.memoUpdateFailed"));
 		}
 	}
 
@@ -398,49 +422,29 @@ export default class MemosViewPlugin extends Plugin {
 			return;
 		}
 
-		const file = this.app.vault.getAbstractFileByPath(memo.sourcePath);
-		if (!(file instanceof TFile)) {
-			new Notice(t("notices.sourceFileNoLongerExists"));
-			return;
-		}
+		try {
+			const result = await rewriteMemoBlock(
+				this.app,
+				memo,
+				this.settings.timestampFormat,
+				(parsedBlock) => serializeMemoBlock(normalized, parsedBlock.timestampLabel, {
+					deletedAt: parsedBlock.deletedAt,
+					archivedAt: parsedBlock.archivedAt,
+					pinnedAt: parsedBlock.pinnedAt,
+				}),
+			);
+			if (!result) {
+				return;
+			}
 
-		const rawContent = await this.app.vault.cachedRead(file);
-		const { frontmatter, body } = splitFrontmatter(rawContent);
-		const normalizedBody = body.replace(/\r\n/g, "\n").trim();
-		const ranges = getMemoBlockRanges(rawContent);
-		if (memo.sourceIndex < 0 || memo.sourceIndex >= ranges.length) {
-			new Notice(t("notices.couldNotLocateBlock"));
-			return;
-		}
-
-		const targetRange = ranges[memo.sourceIndex];
-		if (!targetRange) {
-			new Notice(t("notices.couldNotLocateBlock"));
-			return;
-		}
-
-		const parsedBlock = parseMemoBlock(targetRange.raw, this.settings.timestampFormat);
-		if (!parsedBlock) {
-			new Notice(t("notices.couldNotParseBlock"));
-			return;
-		}
-
-		const nextBlock = serializeMemoBlock(normalized, parsedBlock.timestampLabel, {
-			deletedAt: parsedBlock.deletedAt,
-			archivedAt: parsedBlock.archivedAt,
-			pinnedAt: parsedBlock.pinnedAt,
-		});
-		const nextBody = `${normalizedBody.slice(0, targetRange.start)}${nextBlock}${normalizedBody.slice(targetRange.end)}`.trim();
-		const nextFileContent = frontmatter
-			? nextBody
-				? `${frontmatter}\n\n${nextBody}`
-				: frontmatter
-			: nextBody;
-
-		this.suppressVaultRefresh(file.path);
-		await this.app.vault.modify(file, nextFileContent);
-		if (options.refresh !== false) {
-			await this.refreshAllMemosViews();
+			this.suppressVaultRefresh(result.file.path);
+			await this.app.vault.modify(result.file, result.content);
+			if (options.refresh !== false) {
+				await this.refreshAllMemosViews();
+			}
+		} catch (error) {
+			console.error("Failed to update memo entry", error);
+			new Notice(t("notices.memoUpdateFailed"));
 		}
 	}
 
@@ -464,95 +468,63 @@ export default class MemosViewPlugin extends Plugin {
 			memoGroups.set(memo.sourcePath, currentGroup);
 		});
 
-		for (const [sourcePath, groupMemos] of memoGroups.entries()) {
-			const file = this.app.vault.getAbstractFileByPath(sourcePath);
-			if (!(file instanceof TFile)) {
-				continue;
-			}
-
-			const rawContent = await this.app.vault.cachedRead(file);
-			const { frontmatter, body } = splitFrontmatter(rawContent);
-			let normalizedBody = body.replace(/\r\n/g, "\n").trim();
-			const ranges = getMemoBlockRanges(rawContent);
-			const targetMemos = [...groupMemos].sort((left, right) => right.sourceIndex - left.sourceIndex);
-
-			for (const memo of targetMemos) {
-				if (memo.sourceIndex < 0 || memo.sourceIndex >= ranges.length) {
+		try {
+			for (const [sourcePath, groupMemos] of memoGroups.entries()) {
+				const ctx = await readFileForRewrite(this.app, sourcePath);
+				if (!ctx) {
 					continue;
 				}
 
-				const targetRange = ranges[memo.sourceIndex];
-				if (!targetRange) {
-					continue;
+				const ranges = getMemoBlockRanges(ctx.rawContent);
+				// 按 sourceIndex 倒序删除,避免删除前面的块后影响后面块的位置
+				let normalizedBody = ctx.normalizedBody;
+				const targetMemos = [...groupMemos].sort((left, right) => right.sourceIndex - left.sourceIndex);
+				for (const memo of targetMemos) {
+					if (memo.sourceIndex < 0 || memo.sourceIndex >= ranges.length) {
+						continue;
+					}
+					const targetRange = ranges[memo.sourceIndex];
+					if (!targetRange) {
+						continue;
+					}
+					normalizedBody = removeBlockFromRange(normalizedBody, targetRange.start, targetRange.end);
 				}
 
-				normalizedBody = `${normalizedBody.slice(0, targetRange.start)}${normalizedBody.slice(targetRange.end)}`
-					.replace(/\n{3,}/g, "\n\n")
-					.trim();
+				const nextFileContent = composeFileContent(ctx.frontmatter, normalizedBody);
+				this.suppressVaultRefresh(ctx.file.path);
+				await this.app.vault.modify(ctx.file, nextFileContent);
 			}
 
-			const nextFileContent = frontmatter
-				? normalizedBody
-					? `${frontmatter}\n\n${normalizedBody}`
-					: frontmatter
-				: normalizedBody;
-
-			this.suppressVaultRefresh(file.path);
-			await this.app.vault.modify(file, nextFileContent);
+			await this.refreshAllMemosViews();
+		} catch (error) {
+			console.error("Failed to permanently delete marked memos", error);
+			new Notice(t("notices.memoUpdateFailed"));
 		}
-
-		await this.refreshAllMemosViews();
 	}
 
 	private async updateMemoStatus(memo: MemoEntry, key: MemoStatusKey, enabled: boolean, options: { refresh?: boolean } = {}): Promise<void> {
-		const file = this.app.vault.getAbstractFileByPath(memo.sourcePath);
-		if (!(file instanceof TFile)) {
-			new Notice(t("notices.sourceFileNoLongerExists"));
-			return;
-		}
+		try {
+			const result = await rewriteMemoBlock(
+				this.app,
+				memo,
+				this.settings.timestampFormat,
+				(parsedBlock) => {
+					const nextStatus = buildNextMemoStatus(parsedBlock, key, enabled);
+					return serializeMemoBlock(parsedBlock.content, parsedBlock.timestampLabel, nextStatus);
+				},
+			);
+			if (!result) {
+				return;
+			}
 
-		const rawContent = await this.app.vault.cachedRead(file);
-		const { frontmatter, body } = splitFrontmatter(rawContent);
-		const normalizedBody = body.replace(/\r\n/g, "\n").trim();
-		const ranges = getMemoBlockRanges(rawContent);
-		if (memo.sourceIndex < 0 || memo.sourceIndex >= ranges.length) {
-			new Notice(t("notices.couldNotLocateBlock"));
-			return;
-		}
-
-		const targetRange = ranges[memo.sourceIndex];
-		if (!targetRange) {
-			new Notice(t("notices.couldNotLocateBlock"));
-			return;
-		}
-
-		const parsedBlock = parseMemoBlock(targetRange.raw, this.settings.timestampFormat);
-		if (!parsedBlock) {
-			new Notice(t("notices.couldNotParseBlock"));
-			return;
-		}
-
-		const nextStatus = setMemoStatusValue(
-			{
-				deletedAt: parsedBlock.deletedAt,
-				archivedAt: parsedBlock.archivedAt,
-				pinnedAt: parsedBlock.pinnedAt,
-			},
-			key,
-			enabled ? createMemoStatusTimestamp() : null,
-		);
-		const nextBlock = serializeMemoBlock(parsedBlock.content, parsedBlock.timestampLabel, nextStatus);
-		const nextBody = `${normalizedBody.slice(0, targetRange.start)}${nextBlock}${normalizedBody.slice(targetRange.end)}`.trim();
-		const nextFileContent = frontmatter
-			? nextBody
-				? `${frontmatter}\n\n${nextBody}`
-				: frontmatter
-			: nextBody;
-
-		this.suppressVaultRefresh(file.path);
-		await this.app.vault.modify(file, nextFileContent);
-		if (options.refresh !== false) {
-			await this.refreshAllMemosViews();
+			this.suppressVaultRefresh(result.file.path);
+			await this.app.vault.modify(result.file, result.content);
+			if (options.refresh !== false) {
+				await this.refreshAllMemosViews();
+			}
+		} catch (error) {
+			console.error("Failed to update memo status", error);
+			new Notice(t("notices.memoUpdateFailed"));
 		}
 	}
 	private scheduleBoundFileActivation(file: TFile | null): void {
@@ -605,8 +577,8 @@ export default class MemosViewPlugin extends Plugin {
 			return;
 		}
 
-		const boundFilePath = this.normalizeBoundPath(this.settings.boundFilePath);
-		if (!boundFilePath || this.normalizeBoundPath(file.path) !== boundFilePath) {
+		const boundFilePath = normalizeBoundPath(this.settings.boundFilePath);
+		if (!boundFilePath || normalizeBoundPath(file.path) !== boundFilePath) {
 			return;
 		}
 
@@ -638,29 +610,13 @@ export default class MemosViewPlugin extends Plugin {
 			.replace(/ss/g, seconds);
 	}
 
-	private normalizeBoundPath(path: string | undefined): string {
-		const trimmed = path?.trim();
-		if (!trimmed) {
-			return "";
-		}
-
-		return normalizePath(trimmed.replace(/\\/g, "/"));
-	}
-
 	private findLeafForFile(path: string): WorkspaceLeaf | null {
-		const normalizedPath = this.normalizeBoundPath(path);
-		const activeLeaf = this.app.workspace.activeLeaf;
-		if (
-			activeLeaf?.view instanceof MarkdownView &&
-			this.normalizeBoundPath(activeLeaf.view.file?.path) === normalizedPath
-		) {
-			return activeLeaf;
-		}
+		const normalizedPath = normalizeBoundPath(path);
 
 		for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
 			if (
 				leaf.view instanceof MarkdownView &&
-				this.normalizeBoundPath(leaf.view.file?.path) === normalizedPath
+				normalizeBoundPath(leaf.view.file?.path) === normalizedPath
 			) {
 				return leaf;
 			}

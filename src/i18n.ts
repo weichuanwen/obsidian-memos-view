@@ -1,11 +1,13 @@
 interface TranslationStrings {
 	commands: {
 		openMemosView: string;
+		openMemosSidebar: string;
 		refreshMemosView: string;
 		randomWalkMemo: string;
 	};
 	view: {
 		displayName: string;
+		sidebarDisplayName: string;
 		notes: string;
 		tags: string;
 		days: string;
@@ -22,6 +24,7 @@ interface TranslationStrings {
 		saveMemo: string;
 		noMatchingMemos: string;
 		noMatchingMemosDesc: string;
+		newMemoHint: string;
 		dayToday: string;
 		dayYesterday: string;
 		dayLabel: string;
@@ -105,6 +108,7 @@ interface TranslationStrings {
 		couldNotOpenView: string;
 		imageSaved: string;
 		imageSaveFailed: string;
+		memoUpdateFailed: string;
 	};
 	settings: {
 		displayName: string;
@@ -149,11 +153,13 @@ interface TranslationStrings {
 const en: TranslationStrings = {
 	commands: {
 		openMemosView: "Open memos view",
+		openMemosSidebar: "Open memos sidebar",
 		refreshMemosView: "Refresh memos view",
 		randomWalkMemo: "Random walk memo",
 	},
 	view: {
 		displayName: "Memos",
+		sidebarDisplayName: "Memos",
 		notes: "Notes",
 		tags: "Tags",
 		days: "Days",
@@ -170,6 +176,7 @@ const en: TranslationStrings = {
 		saveMemo: "Send",
 		noMatchingMemos: "No matching memos",
 		noMatchingMemosDesc: "Check your Daily notes setup, search keyword, or tag filter.",
+		newMemoHint: "New memo will appear here",
 		dayToday: "Today",
 		dayYesterday: "Yesterday",
 		dayLabel: "{} · {}",
@@ -253,6 +260,7 @@ const en: TranslationStrings = {
 		couldNotOpenView: "Could not open memos view.",
 		imageSaved: "Image saved and embedded.",
 		imageSaveFailed: "Failed to save pasted image.",
+		memoUpdateFailed: "Failed to update the memo file.",
 	},
 	settings: {
 		displayName: "Display name",
@@ -297,11 +305,13 @@ const en: TranslationStrings = {
 const zhCN: TranslationStrings = {
 	commands: {
 		openMemosView: "打开 Memos 视图",
+		openMemosSidebar: "打开 Memos 侧边栏",
 		refreshMemosView: "刷新 Memos 视图",
 		randomWalkMemo: "随机漫步",
 	},
 	view: {
 		displayName: "Memos",
+		sidebarDisplayName: "Memos",
 		notes: "笔记",
 		tags: "标签",
 		days: "天数",
@@ -312,12 +322,13 @@ const zhCN: TranslationStrings = {
 		deleted: "回收站",
 		toggleSidebar: "切换侧边栏",
 		randomWalk: "随机漫步",
-		searchPlaceholder: "搜索备忘录、文件、标签",
+		searchPlaceholder: "搜索...",
 		composerPlaceholder: "在此记录你的想法...",
 		togglePreview: "切换预览",
 		saveMemo: "发送",
 		noMatchingMemos: "没有匹配的备忘录",
 		noMatchingMemosDesc: "请检查日记设置、搜索关键词或标签筛选。",
+		newMemoHint: "新条目会出现在这里",
 		dayToday: "今天",
 		dayYesterday: "昨天",
 		dayLabel: "{} · {}",
@@ -401,6 +412,7 @@ const zhCN: TranslationStrings = {
 		couldNotOpenView: "无法打开 Memos 视图。",
 		imageSaved: "图片已保存并嵌入。",
 		imageSaveFailed: "保存粘贴的图片失败。",
+		memoUpdateFailed: "更新备忘录文件失败。",
 	},
 	settings: {
 		displayName: "显示名称",
@@ -465,14 +477,24 @@ function resolve(obj: Record<string, unknown>, path: string[]): string | undefin
 	return typeof current === "string" ? current : undefined;
 }
 
-function getLocale(): string {
+function detectLocale(): string {
 	if (typeof navigator !== "undefined" && navigator.language) {
 		return navigator.language;
 	}
 	return "en";
 }
 
-let currentLocale = getLocale();
+let currentLocale = detectLocale();
+
+/** 获取当前 locale（如 "zh-CN"、"en"） */
+export function getLocale(): string {
+	return currentLocale;
+}
+
+/** 当前 locale 是否为中文 */
+export function isZhLocale(): boolean {
+	return currentLocale.toLowerCase().startsWith("zh");
+}
 
 export function setLocale(locale: string): void {
 	currentLocale = locale;

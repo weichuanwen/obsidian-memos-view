@@ -188,10 +188,6 @@ export function splitFrontmatter(content: string): { frontmatter: string; body: 
 	};
 }
 
-export function splitMemoBlocks(content: string): string[] {
-	return getMemoBlockRanges(content).map((block) => block.raw);
-}
-
 export function getMemoBlockRanges(content: string): MemoBlockRange[] {
 	const normalizedBody = splitFrontmatter(content).body.replace(/\r\n/g, "\n").trim();
 	if (!normalizedBody) {
