@@ -19,6 +19,7 @@ import type { DailyNotesConfig, MemoEntry, MemosPluginSettings } from "./types";
 import type { MemoStatusKey } from "./memos/parser";
 import { t } from "./i18n";
 import { normalizeBoundPath } from "./utils/path";
+import { readDailyNoteTemplate, renderDailyNoteTemplate } from "./dailyNotes/template";
 
 export default class MemosViewPlugin extends Plugin {
 	settings: MemosPluginSettings = DEFAULT_SETTINGS;
@@ -302,7 +303,8 @@ export default class MemosViewPlugin extends Plugin {
 		}
 
 		try {
-			const timestampLabel = this.formatTimeByPattern(new Date(), this.settings.timestampFormat);
+			const now = new Date();
+			const timestampLabel = this.formatTimeByPattern(now, this.settings.timestampFormat);
 			const payload = serializeMemoBlock(normalized, timestampLabel);
 
 			if (this.settings.memoStoreMode === "yearly") {
@@ -310,8 +312,9 @@ export default class MemosViewPlugin extends Plugin {
 				return;
 			}
 
+			await this.loadDailyNotesConfig();
 			const folder = this.getDailyNotesFolder();
-			const fileName = this.formatDateByPattern(new Date(), this.dailyNotesConfig?.format ?? "YYYY-MM-DD");
+			const fileName = this.formatDateByPattern(now, this.dailyNotesConfig?.format ?? "YYYY-MM-DD");
 			const filePath = normalizePath(folder ? `${folder}/${fileName}.md` : `${fileName}.md`);
 			const existing = this.app.vault.getAbstractFileByPath(filePath);
 
@@ -333,8 +336,18 @@ export default class MemosViewPlugin extends Plugin {
 				if (folder) {
 					await this.app.vault.createFolder(folder).catch(() => undefined);
 				}
+				const template = await readDailyNoteTemplate(this.app, this.dailyNotesConfig?.template);
+				const renderedTemplate = renderDailyNoteTemplate(template, now, fileName);
+				const { frontmatter, body } = splitFrontmatter(renderedTemplate);
+				const normalizedBody = body.replace(/\r\n/g, "\n").trim();
 				const storeHeading = this.settings.memoStoreHeading.trim();
-				const fileContent = storeHeading ? `${storeHeading}\n\n${payload}\n` : payload;
+				let nextBody: string;
+				if (storeHeading) {
+					nextBody = this.insertPayloadUnderHeading(normalizedBody, payload, storeHeading);
+				} else {
+					nextBody = normalizedBody ? `${payload}\n\n${normalizedBody}` : payload;
+				}
+				const fileContent = composeFileContent(frontmatter, nextBody);
 				this.suppressVaultRefresh(filePath);
 				await this.app.vault.create(filePath, fileContent);
 			}
