@@ -1,7 +1,7 @@
 import { MarkdownRenderer, Modal, Notice, setIcon } from "obsidian";
 import type { MemosView } from "../memosView";
-import type { MemoEntry } from "../../types";
-import { t } from "../../i18n";
+import type { MemoEntry } from "../../../types";
+import { t } from "../../../i18n";
 
 export class MemosRandomWalkModal extends Modal {
 	private readonly view: MemosView;

@@ -72,6 +72,8 @@ interface TranslationStrings {
 		wikilinkHeading: string;
 		wikilinkParagraph: string;
 		wikilinkBlock: string;
+		expandEditor: string;
+		done: string;
 	};
 	viewFilters: {
 		views: string;
@@ -139,6 +141,9 @@ interface TranslationStrings {
 		imageEmbedStyleDesc: string;
 		imageEmbedStyleWikilink: string;
 		imageEmbedStyleMarkdown: string;
+		dailyNotesPath: string;
+		dailyNotesPathValue: string;
+		dailyNotesPathEmpty: string;
 	};
 	share: {
 		copyImage: string;
@@ -224,6 +229,8 @@ const en: TranslationStrings = {
 		wikilinkHeading: "Heading",
 		wikilinkParagraph: "Paragraph",
 		wikilinkBlock: "Block",
+		expandEditor: "Edit in full screen",
+		done: "Done",
 	},
 	viewFilters: {
 		views: "Views",
@@ -291,6 +298,9 @@ const en: TranslationStrings = {
 		imageEmbedStyleDesc: "Choose the format used when inserting images: Wikilink (![[image.png]]) or Markdown (![alt](image.png)).",
 		imageEmbedStyleWikilink: "Wikilink  ![[...]]",
 		imageEmbedStyleMarkdown: "Markdown  ![...](...)",
+		dailyNotesPath: "Daily notes path",
+		dailyNotesPathValue: "Memos are read from and written to: {}\nTo change it, configure the core \"Daily notes\" plugin in Settings → Daily notes.",
+		dailyNotesPathEmpty: "Not configured. Enable and set the \"New file location\" in Settings → Daily notes (core plugin).",
 	},
 	share: {
 		copyImage: "Copy image",
@@ -376,6 +386,8 @@ const zhCN: TranslationStrings = {
 		wikilinkHeading: "标题",
 		wikilinkParagraph: "段落",
 		wikilinkBlock: "块",
+		expandEditor: "全屏编辑",
+		done: "完成",
 	},
 	viewFilters: {
 		views: "视图",
@@ -443,6 +455,9 @@ const zhCN: TranslationStrings = {
 		imageEmbedStyleDesc: "选择插入图片时使用的格式：Wikilink（![[image.png]]）或 Markdown（![alt](image.png)）。",
 		imageEmbedStyleWikilink: "Wikilink  ![[...]]",
 		imageEmbedStyleMarkdown: "Markdown  ![...](...)",
+		dailyNotesPath: "日记读写路径",
+		dailyNotesPathValue: "备忘录读取与写入位置：{}\n如需修改，请在「设置 → 每日笔记」核心插件中配置。",
+		dailyNotesPathEmpty: "未配置。请启用并在「设置 → 每日笔记」核心插件中设置「新建文件位置」。",
 	},
 	share: {
 		copyImage: "复制图片",

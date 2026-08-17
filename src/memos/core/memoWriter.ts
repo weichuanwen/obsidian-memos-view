@@ -9,8 +9,8 @@ import {
 	setMemoStatusValue,
 	splitFrontmatter,
 } from "./parser";
-import type { MemoEntry } from "../types";
-import { t } from "../i18n";
+import type { MemoEntry } from "../../types";
+import { t } from "../../i18n";
 
 /**
  * 备忘录文件写入服务:封装 frontmatter 拆分/重组、memo 块定位与替换的重复逻辑。

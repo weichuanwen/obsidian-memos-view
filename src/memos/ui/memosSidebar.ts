@@ -1,8 +1,8 @@
 import type { WorkspaceLeaf } from "obsidian";
 import { setIcon } from "obsidian";
-import { VIEW_TYPE_MEMOS_SIDEBAR } from "../types";
-import { t } from "../i18n";
-import type MemosViewPlugin from "../main";
+import { VIEW_TYPE_MEMOS_SIDEBAR } from "../../types";
+import { t } from "../../i18n";
+import type MemosViewPlugin from "../../main";
 import { MemosView } from "./memosView";
 
 /**

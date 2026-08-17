@@ -1,5 +1,5 @@
 import { TFile } from "obsidian";
-import type { MemoEntry } from "../types";
+import type { MemoEntry } from "../../types";
 
 const DATE_IN_FILE_NAME = /(\d{4})-(\d{2})-(\d{2})/;
 const TAG_PATTERN = /(^|\s)#([\p{L}\p{N}_/-]+)/gu;

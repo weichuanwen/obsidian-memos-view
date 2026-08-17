@@ -1,14 +1,14 @@
-import { ItemView, MarkdownRenderer, Menu, Notice, WorkspaceLeaf, setIcon, type ViewStateResult } from "obsidian";
+import { ItemView, MarkdownRenderer, Menu, Notice, Platform, WorkspaceLeaf, setIcon, type ViewStateResult } from "obsidian";
 import { Scope } from "obsidian";
-import type MemosViewPlugin from "../main";
+import type MemosViewPlugin from "../../main";
 import { TFile } from "obsidian";
-import { VIEW_TYPE_MEMOS } from "../types";
-import type { MemosViewFilter, MemosSortOrder, MemosStatusFilter } from "../memos/viewModel";
-import { t, isZhLocale } from "../i18n";
-import type { MemoEntry, MemosViewState } from "../types";
-import { loadMemosFromDailyNotes } from "./memoStore";
-import { buildViewModel } from "./viewModel";
-import type { HeatmapWeek, HeatmapMonthLabel } from "./viewModel";
+import { VIEW_TYPE_MEMOS } from "../../types";
+import type { MemosViewFilter, MemosSortOrder, MemosStatusFilter } from "../core/viewModel";
+import { t, isZhLocale } from "../../i18n";
+import type { MemoEntry, MemosViewState } from "../../types";
+import { loadMemosFromDailyNotes } from "../core/memoStore";
+import { buildViewModel } from "../core/viewModel";
+import type { HeatmapWeek, HeatmapMonthLabel } from "../core/viewModel";
 import {
 	applyWikilinkSuggestion,
 	createBlockId,
@@ -17,13 +17,14 @@ import {
 	parseWikilinkContext,
 	type WikilinkContext,
 	type WikilinkSuggestion,
-} from "./wikilink";
-import { openMemoShareModal } from "./share";
-import { buildAttachmentEmbedLink } from "../utils/embed";
-import { WikilinkSuggestController } from "../editor/wikilinkSuggest";
-import { insertTextAtCaret } from "../utils/text";
+} from "../wikilink";
+import { openMemoShareModal } from "../share";
+import { buildAttachmentEmbedLink } from "../../utils/embed";
+import { WikilinkSuggestController } from "../../editor/wikilinkSuggest";
+import { insertTextAtCaret } from "../../utils/text";
 import { MemosRandomWalkModal } from "./modals/randomWalkModal";
 import { AttachmentPickerModal } from "./modals/attachmentPickerModal";
+import { MemosFullscreenEditorModal } from "./modals/fullscreenEditorModal";
 
 const MEMOS_PAGE_SIZE = 50;
 
@@ -633,6 +634,11 @@ export class MemosView extends ItemView {
 		const composerEl = parentEl.createDiv({
 			cls: `memos-composer ${this.editingMemo ? "is-editing" : ""}`,
 		});
+		// 移动端:空闲(无草稿/非编辑)时显示收缩条,点击展开真实输入框
+		const collapsedBarEl = composerEl.createDiv({ cls: "memos-composer-collapsed-bar" });
+		const collapsedIconEl = collapsedBarEl.createSpan({ cls: "memos-composer-collapsed-icon" });
+		setIcon(collapsedIconEl, "plus");
+		collapsedBarEl.createSpan({ cls: "memos-composer-collapsed-text", text: t("view.composerPlaceholder") });
 		const editorWrapEl = composerEl.createDiv({ cls: "memos-composer-editor" });
 		const textareaEl = editorWrapEl.createEl("textarea", {
 			cls: "memos-composer-input",
@@ -660,6 +666,31 @@ export class MemosView extends ItemView {
 		});
 		textareaEl.value = this.composerValue;
 		this.autosizeTextarea(textareaEl);
+		if (Platform.isPhone && !this.editingMemo && !this.composerValue) {
+			composerEl.addClass("is-collapsed");
+		}
+		collapsedBarEl.addEventListener("click", () => {
+			composerEl.removeClass("is-collapsed");
+			this.scheduleTimeout(() => textareaEl.focus(), 0);
+		});
+		textareaEl.addEventListener("focus", () => {
+			composerEl.removeClass("is-collapsed");
+		});
+		textareaEl.addEventListener("blur", () => {
+			if (!Platform.isPhone) {
+				return;
+			}
+			// 延迟检查:点击工具栏按钮会造成瞬时失焦,此时不应收缩
+			this.scheduleTimeout(() => {
+				if (this.editingMemo || this.composerValue.trim()) {
+					return;
+				}
+				if (composerEl.contains(document.activeElement)) {
+					return;
+				}
+				composerEl.addClass("is-collapsed");
+			}, 150);
+		});
 		textareaEl.addEventListener("input", () => {
 			this.composerValue = textareaEl.value;
 			this.autosizeTextarea(textareaEl);
@@ -719,6 +750,25 @@ export class MemosView extends ItemView {
 			if (this.isComposerPreview) {
 				previewToggle.addClass("is-active");
 			}
+		}
+		// 移动端:全屏编辑,缓解小输入框编辑长文本的体验问题
+		if (Platform.isPhone) {
+			this.createToolDivider(toolsEl);
+			this.createToolButton(toolsEl, "maximize", t("view.expandEditor"), () => {
+				new MemosFullscreenEditorModal(
+					this.app,
+					this.composerValue,
+					(value) => {
+						this.composerValue = value;
+						textareaEl.value = value;
+						this.autosizeTextarea(textareaEl);
+						composerEl.removeClass("is-collapsed");
+						if (this.isComposerPreview) {
+							void this.renderComposerPreview(previewEl);
+						}
+					},
+				).open();
+			});
 		}
 		this.bindTextareaWikilinkSuggest(
 			textareaEl,
@@ -2040,6 +2090,25 @@ export class MemosView extends ItemView {
 		if (inlinePreviewToggle instanceof HTMLElement) {
 			inlinePreviewToggle.addClass("memos-inline-preview-toggle");
 		}
+		// 移动端:全屏编辑,与 composer 的展开按钮行为一致
+		if (Platform.isPhone) {
+			this.createToolDivider(toolsEl);
+			this.createToolButton(toolsEl, "maximize", t("view.expandEditor"), () => {
+				new MemosFullscreenEditorModal(
+					this.app,
+					this.inlineEditorValue,
+					(value) => {
+						this.inlineEditorValue = value;
+						textareaEl.value = value;
+						this.autosizeTextarea(textareaEl);
+						counterEl.setText(String(value.length));
+						if (this.isInlineEditorPreview) {
+							void this.renderInlineEditorPreview(previewEl, memo);
+						}
+					},
+				).open();
+			});
+		}
 		this.bindTextareaWikilinkSuggest(textareaEl, wikilinkSuggestEl, memo.sourcePath, (value) => {
 			this.inlineEditorValue = value;
 		});
@@ -2454,6 +2523,9 @@ export class MemosView extends ItemView {
 		this.isComposerExpanded = false;
 
 		this.clearComposerInput();
+		if (Platform.isPhone) {
+			this.setComposerCollapsed(true);
+		}
 
 		if (memoBeingEdited) {
 			await this.plugin.updateMemoEntry(memoBeingEdited, content, { refresh: false });
@@ -2464,6 +2536,13 @@ export class MemosView extends ItemView {
 		}
 
 		await this.refreshMemoStream();
+	}
+
+	private setComposerCollapsed(collapsed: boolean): void {
+		const composerEl = this.contentEl.find(".memos-composer");
+		if (composerEl) {
+			composerEl.toggleClass("is-collapsed", collapsed);
+		}
 	}
 
 	private clearComposerInput(): void {

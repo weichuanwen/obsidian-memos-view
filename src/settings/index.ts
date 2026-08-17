@@ -1,8 +1,8 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
-import type MemosViewPlugin from "./main";
-import type { MemosPluginSettings } from "./types";
-import { t } from "./i18n";
-import { normalizeBoundPath } from "./utils/path";
+import type MemosViewPlugin from "../main";
+import type { MemosPluginSettings } from "../types";
+import { t } from "../i18n";
+import { normalizeBoundPath } from "../utils/path";
 
 export const DEFAULT_SETTINGS: MemosPluginSettings = {
 	boundFilePath: "",
@@ -27,6 +27,10 @@ export class MemosSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
+
+		new Setting(containerEl)
+			.setName(t("settings.dailyNotesPath"))
+			.setDesc(this.buildDailyNotesPathDesc());
 
 		new Setting(containerEl)
 			.setName(t("settings.displayName"))
@@ -160,6 +164,19 @@ export class MemosSettingTab extends PluginSettingTab {
 						}),
 				);
 		}
+	}
+
+	private buildDailyNotesPathDesc(): DocumentFragment {
+		const folder = this.plugin.getDailyNotesFolder();
+		const text = folder
+			? t("settings.dailyNotesPathValue", folder)
+			: t("settings.dailyNotesPathEmpty");
+		const frag = document.createDocumentFragment();
+		text.split("\n").forEach((line, i) => {
+			if (i > 0) frag.createEl("br");
+			frag.appendText(line);
+		});
+		return frag;
 	}
 }
 

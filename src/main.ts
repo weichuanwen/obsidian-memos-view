@@ -3,20 +3,20 @@ import {
 	getMemoBlockRanges,
 	serializeMemoBlock,
 	splitFrontmatter,
-} from "./memos/parser";
+} from "./memos/core/parser";
 import {
 	buildNextMemoStatus,
 	composeFileContent,
 	readFileForRewrite,
 	removeBlockFromRange,
 	rewriteMemoBlock,
-} from "./memos/memoWriter";
-import { MemosView } from "./memos/memosView";
-import { MemosSidebarView } from "./memos/memosSidebarView";
+} from "./memos/core/memoWriter";
+import { MemosView } from "./memos/ui/memosView";
+import { MemosSidebarView } from "./memos/ui/memosSidebar";
 import { DEFAULT_SETTINGS, MemosSettingTab } from "./settings";
 import { VIEW_TYPE_MEMOS, VIEW_TYPE_MEMOS_SIDEBAR } from "./types";
 import type { DailyNotesConfig, MemoEntry, MemosPluginSettings } from "./types";
-import type { MemoStatusKey } from "./memos/parser";
+import type { MemoStatusKey } from "./memos/core/parser";
 import { t } from "./i18n";
 import { normalizeBoundPath } from "./utils/path";
 import { readDailyNoteTemplate, renderDailyNoteTemplate } from "./dailyNotes/template";

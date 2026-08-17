@@ -664,6 +664,161 @@
 	display: none;
 }
 
+/* ===== 移动端:composer 空闲时收缩为一行假输入栏,点击展开 ===== */
+/* 状态类由 memosView.ts 在聚焦/失焦/发送时切换(Platform.isMobile) */
+.memos-composer-collapsed-bar {
+	display: none;
+}
+
+/* 收缩/展开过渡:display:none 无法参与过渡,改用 max-height + opacity 动画 */
+body.is-mobile .memos-composer {
+	transition: padding 200ms ease;
+}
+
+/* 展开态上限取宽松值(输入框已被限制在 35vh 内,实际不会触顶);
+   稳态保持 overflow:visible,避免裁剪 absolute 定位的 wikilink 建议面板 */
+body.is-mobile .memos-composer-editor,
+body.is-mobile .memos-composer-footer {
+	max-height: 45vh;
+	opacity: 1;
+	transition: max-height 200ms ease, opacity 200ms ease, margin-top 200ms ease;
+}
+
+body.is-mobile .memos-composer.is-collapsed .memos-composer-editor,
+body.is-mobile .memos-composer.is-collapsed .memos-composer-footer {
+	overflow: hidden;
+	max-height: 0;
+	opacity: 0;
+	margin-top: 0;
+	pointer-events: none;
+}
+
+body.is-mobile .memos-composer.is-collapsed {
+	padding: 4px 8px;
+}
+
+body.is-mobile .memos-composer-collapsed-bar {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 0 8px;
+	border-radius: 8px;
+	color: var(--text-faint);
+	cursor: pointer;
+	overflow: hidden;
+	max-height: 0;
+	opacity: 0;
+	transition: max-height 200ms ease, opacity 200ms ease;
+}
+
+body.is-mobile .memos-composer.is-collapsed .memos-composer-collapsed-bar {
+	min-height: 36px;
+	max-height: 40px;
+	opacity: 1;
+}
+
+.memos-composer-collapsed-icon {
+	display: inline-flex;
+	align-items: center;
+}
+
+.memos-composer-collapsed-icon svg {
+	width: 16px;
+	height: 16px;
+}
+
+.memos-composer-collapsed-text {
+	font-size: 14px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* 移动端:限制输入框最大高度,长文本改为内部滚动而非无限撑开 */
+body.is-mobile .memos-composer-input,
+body.is-mobile .memos-inline-editor-input {
+	max-height: 35vh;
+	overflow-y: auto;
+}
+
+/* 预览区同样限高滚动,保证展开态内容不会超过过渡动画的 45vh 上限 */
+body.is-mobile .memos-composer-preview {
+	max-height: 35vh;
+	overflow-y: auto;
+}
+
+/* 移动端:Obsidian app.css 以更高优先级(.is-mobile textarea)给 textarea
+   重新施加圆角与原生外观,需 !important 强制覆盖,否则首行文字仍会被裁剪 */
+body.is-mobile .memos-composer-input,
+body.is-mobile .memos-inline-editor-input {
+	border-radius: 0 !important;
+	-webkit-appearance: none;
+	appearance: none;
+}
+
+body.is-mobile .memos-inline-editor-input {
+	min-height: 120px;
+}
+
+/* ===== 移动端:全屏编辑模态 ===== */
+/* 不铺满整屏:保留 Obsidian 模态默认的屏幕边距与圆角,仅拉高编辑区 */
+.memos-fs-editor {
+	height: min(85dvh, 640px);
+	display: flex;
+	flex-direction: column;
+}
+
+.memos-fs-editor .modal-content {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	padding: 12px;
+	overflow: hidden;
+}
+
+.memos-fs-editor-input {
+	flex: 1;
+	min-height: 0;
+	padding: 8px;
+	resize: none;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	background: var(--background-secondary);
+	font: inherit;
+	line-height: 1.6;
+	color: var(--text-normal);
+}
+
+.memos-fs-editor-input:focus {
+	outline: none;
+	border-color: var(--interactive-accent);
+}
+
+.memos-fs-editor-footer {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	padding-top: 10px;
+}
+
+.memos-fs-editor-button {
+	padding: 8px 16px;
+	border: 0;
+	border-radius: 8px;
+	font-size: 14px;
+	cursor: pointer;
+}
+
+.memos-fs-editor-button.is-cancel {
+	background: var(--background-modifier-hover);
+	color: var(--text-muted);
+}
+
+.memos-fs-editor-button.is-submit {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
 .memos-composer-preview {
 	display: none;
 	min-height: 100px;
@@ -1161,6 +1316,11 @@
 .memos-card-content {
 	line-height: 1.6;
 	user-select: text;
+	/* 移动端:Obsidian 在 app 容器上设置了 user-select:none 与 touch-callout:none,
+	   需用 !important 覆盖,否则长按无法呼出文字选择 */
+	-webkit-user-select: text !important;
+	user-select: text !important;
+	-webkit-touch-callout: default;
 	overflow-wrap: anywhere;
 	word-break: break-word;
 }
@@ -1196,6 +1356,8 @@
 	min-height: 200px;
 	padding: 0;
 	resize: none;
+	/* 覆盖移动端默认 textarea 圆角,避免内容按圆角曲线被裁剪遮挡文字 */
+	border-radius: 0;
 	background: transparent !important;
 	box-shadow: none !important;
 	font: inherit;

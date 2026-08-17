@@ -1,4 +1,4 @@
-import type { MemoEntry } from "../types";
+import type { MemoEntry } from "../../types";
 
 export interface TagStat {
 	tag: string;

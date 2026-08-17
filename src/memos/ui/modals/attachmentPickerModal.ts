@@ -1,6 +1,6 @@
 import { Modal, TFile, type App } from "obsidian";
-import { t } from "../../i18n";
-import { buildAttachmentEmbedLink } from "../../utils/embed";
+import { t } from "../../../i18n";
+import { buildAttachmentEmbedLink } from "../../../utils/embed";
 
 const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "bmp", "svg", "webp"]);
 

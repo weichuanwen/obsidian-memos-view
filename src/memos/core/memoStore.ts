@@ -1,6 +1,6 @@
 import { App, TFile } from "obsidian";
 import { parseDailyNoteToMemos, parseYearlyNoteToMemos } from "./parser";
-import type { MemoEntry } from "../types";
+import type { MemoEntry } from "../../types";
 
 export async function loadMemosFromDailyNotes(
 	app: App,
